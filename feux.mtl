@@ -1,0 +1,7 @@
+@F1 [](push -> <>[<=60]vertp)
+@F2 [](rougev -> <>[<=30]vertv)
+@F3 [](vertv -> !vertp U rougev)
+@F4 [](vertp -> !vertv U rougep)
+@F5 [](vertv -> !rougev U push)
+@F6 [](vertv -> [][<=50]!rougev)
+@F7 [](vertp -> [][<=20]!rougep)

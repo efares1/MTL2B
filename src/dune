@@ -1,0 +1,14 @@
+(executables
+ (names main lbtt2b mtl2x)
+ (public_names mtl2ltl.exe lbtt2b.exe mtl2x.exe)
+ (libraries str unix shexp.process)
+ (modules mtl mtl2mtl ltl mtl2ltl parser lexer
+ 	  main
+          lbtt lbtt_parser lbtt_lexer
+	  ta lbtt2ta lbtt2b
+	  mtl2x))
+
+(menhir
+ (modules parser lbtt_parser))
+
+(ocamllex lexer lbtt_lexer)
