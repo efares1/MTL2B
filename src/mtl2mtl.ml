@@ -32,3 +32,10 @@ let rec add_next = function
   | p -> XUntil(Untimed,p,p)
 
 let add_init p = And(Event "_init_", add_next p)
+
+let close_alpha alpha p =
+  let evts = get_evts p in
+  let ors = List.fold_left (fun r e -> mk_or (Event e) r)
+              (Event alpha) evts
+  in
+  And (p, mtl_box Untimed ors)

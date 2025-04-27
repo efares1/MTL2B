@@ -24,8 +24,11 @@ let ta_out = ref false
 let xta_out = ref false
 let b_out = ref false
 let p_out = ref false
+let close_alpha = ref true
+
 let speclist =
   [("-q", Arg.Clear verbose, "no trace information");
+   ("-c", Arg.Clear close_alpha, "don't close alphabet, don't add 'other' event");
    ("-ta", Arg.Set ta_out, "output TA in dot/pdf format");
    ("-xta", Arg.Set xta_out, "output TA in XTA format");
    ("-b", Arg.Set b_out, "output TA in B format");
@@ -117,7 +120,10 @@ let _ =
     Printf.eprintf "ltl2tgba not found";
     exit (-1)
   );
-  let alpha = String.concat "," (List'.sort_uniq compare (List'.concat_map (fun (_,m) -> Mtl.get_evts m) fl)) in
+  let alpha =
+    String.concat ","
+      ((if !close_alpha then ["other"] else []) @
+         (List'.sort_uniq compare (List'.concat_map (fun (_,m) -> Mtl.get_evts m) fl))) in
   let main =
     mkdir ~p:() "out" >>
     List.iter fl
@@ -125,7 +131,9 @@ let _ =
         let f = Format.asprintf "%a" Mtl.pp_mtl mtl in
         ((if !verbose then echo f else return ())
          >> (echo f
-             |- run mtl2ltl (if !verbose then [] else ["-q"])
+             |- run mtl2ltl
+                  ((if !verbose then [] else ["-q"])
+                   @ (if !close_alpha then [] else ["-c"]))
              |- run ltl2tgba ["--lbtt=t"; "-"]
              |- run lbtt2b
                   (["-cr"]

@@ -16,9 +16,13 @@ let parse_with_error lexbuf =
     Printf.fprintf stderr "%a: syntax error\n" print_position lexbuf;
     exit (-1)
 
-let usage_msg = "cmd [-q]"
+let usage_msg = "cmd [-q] [-c]"
 let verbose = ref true
-let speclist = [("-q", Arg.Clear verbose, "no trace information")]
+let close_alpha = ref true
+let speclist = [
+    ("-q", Arg.Clear verbose, "no trace information");
+    ("-c", Arg.Clear close_alpha, "don't close alphabet, don't add 'other' event");
+  ]
 let input_files = ref []
 let anon_fun filename = input_files := filename::!input_files
 
@@ -26,10 +30,12 @@ let _ =
   Arg.parse speclist anon_fun usage_msg;
   let lexbuf = Lexing.from_channel stdin in
   let f = parse_with_error lexbuf in
+  let f = if !close_alpha then Mtl2mtl.close_alpha "other" f else f in
+  let _ = if !verbose && !close_alpha then Format.eprintf "etape0: %a\n" Mtl.pp_mtl f in
   let f = Mtl2mtl.add_init f in
-  let _ = if !verbose then Format.eprintf "etape0: %a\n" Mtl.pp_mtl f in
-  let f = Mtl2mtl.elim_Ule_Rle_Rge f in
   let _ = if !verbose then Format.eprintf "etape1: %a\n" Mtl.pp_mtl f in
+  let f = Mtl2mtl.elim_Ule_Rle_Rge f in
+  let _ = if !verbose then Format.eprintf "etape2: %a\n" Mtl.pp_mtl f in
   let f = Mtl2ltl.mtl2ltl f in
-  let _ = if !verbose then Printf.eprintf "etape2: %a\n" (Ltl.pp_ltl Mtl2ltl.pp_prop) f in
+  let _ = if !verbose then Printf.eprintf "etape3: %a\n" (Ltl.pp_ltl Mtl2ltl.pp_prop) f in
   Printf.printf "%a\n" (Ltl.pp_ltl Mtl2ltl.pp_prop) f
