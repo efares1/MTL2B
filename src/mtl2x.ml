@@ -137,7 +137,7 @@ let _ =
              |- run ltl2tgba ["--lbtt=t"; "-"]
              |- run lbtt2b
                   (["-cr"]
-                   @ (if !ta_out then ["-ta"; "out/"^nm^".dot"] else [])
+                   @ (if !ta_out then ["-dta"; "out/"^nm^".dot"] else [])
                    @ (if !xta_out then ["-alpha"; alpha; "-name"; nm; "-xtaraw"; "out/"^nm^".xta"] else [])
                    @ ["-evb"; "out/"^nm^".mch"]
                    @ (if !verbose then [] else ["-q"])

@@ -28,9 +28,8 @@ git push -uf origin main
 
 ## Execute
 ```
-  _build/default/src/main.exe
+  _build/install/default/bin/mtl2x.exe -xta feux.mtl
 ```
-
 ## Integrate with your tools
 
 - [ ] [Set up project integrations](https://gitlab.irit.fr/methodesformelles/mtl2b/mtl2b/-/settings/integrations)
