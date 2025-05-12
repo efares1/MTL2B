@@ -43,11 +43,11 @@ let _ =
   Arg.parse speclist anon_fun usage_msg;
   let lexbuf = Lexing.from_channel stdin in
   let a = parse_with_error lexbuf in
-  if !verbose then Printf.fprintf stdout "etape 0: %a" Lbtt.pp_auto a;
+  if !verbose then Printf.fprintf stdout "etape 0 [read LBTT]: %a" Lbtt.pp_auto a;
   let a = Lbtt.rm_or a in
-  if !verbose then Printf.fprintf stdout "etape 1: %a" Lbtt.pp_auto a;
+  if !verbose then Printf.fprintf stdout "etape 1 [split OR trans]: %a" Lbtt.pp_auto a;
   let a = Lbtt.add_rst a in
-  if !verbose then Printf.fprintf stdout "etape 2: %a" Lbtt.pp_auto a;
+  if !verbose then Printf.fprintf stdout "etape 2 [add RST]: %a" Lbtt.pp_auto a;
   let alpha = String.split_on_char ',' !alpha in
   let ta = if alpha=[] then Lbtt2ta.lbtt2ta a else Lbtt2ta.lbtt2ta ?alpha:(Some alpha) a in
   let ta = if !cropt then Ta.rem_unused_resets ta else ta in 

@@ -26,7 +26,7 @@ type mtl =
 | XRelease of ctr * mtl * mtl
 
 let rec get_evts = function
-    Event s -> [s]
+    Event s | NEvent s -> [s]
   | Next m -> get_evts m
   | Or(m1,m2) | And(m1,m2) | Until(_,m1,m2) | XUntil(_,m1,m2)
     | Release(_,m1,m2) | XRelease(_,m1,m2)
