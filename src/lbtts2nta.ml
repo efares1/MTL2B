@@ -35,6 +35,7 @@ let _ =
   let ta = Lbtt2ta.lbtt2ta a in
   let ta = if !cropt then Ta.rem_unused_resets ta else ta in 
   let ta = if !cropt then Ta.rem_sync_clks ta else ta in 
+  let ta = if !prinv then Ta.propagate ta else ta in 
   if (!dta_file <> "") then (
     let out = open_out !dta_file in
     Ta.ppd_auto out ta;

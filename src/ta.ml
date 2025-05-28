@@ -25,8 +25,10 @@ let rec weaker c1 c2 =
   | Clk(x,GT,d1), Clk(x',GT,d2) -> x=x' && d2 >= d1
   | True, _ -> true
   | _, False -> true
-  | c1, And(c21, c22) -> weaker c1 c21 || weaker c1 c22
   | And(c11,c12), c2 -> weaker c11 c2 && weaker c12 c2
+  | c1, And(c21, c22) -> weaker c1 c21 || weaker c1 c22
+  | c1, Or(c21, c22) -> weaker c1 c21 && weaker c1 c22
+  | Or(c11,c12), c2 -> weaker c11 c2 || weaker c12 c2
   | c1,c2 -> c1=c2
 
 let mk_and c1 c2 =
@@ -50,6 +52,25 @@ let rec mk_orl = function
     [] -> False
   | x::l -> mk_or x (mk_orl l)
 
+let rec upper = function
+    True -> True
+  | False -> False
+  | Clk(_,GE,_) | Clk(_,GT,_) -> True
+  | (Clk(_,LE,_) | Clk(_,LT,_)) as c -> c
+  | And(c1,c2) -> mk_and (upper c1) (upper c2)
+  | Or(c1,c2) -> mk_or (upper c1) (upper c2)
+
+let rec reset cl = function
+    True -> True
+  | False -> False
+  | Clk(c,LE,_) when List.mem c cl -> True
+  | Clk(c,LT,0) when List.mem c cl -> False
+  | Clk(c,LT,_) when List.mem c cl -> True
+  | (Clk(_,LT,_) | Clk(_,LE,_)) as c -> c
+  | (Clk(_,GE,_) | Clk(_,GT,_)) -> failwith "> constraint in state invariant"
+  | And(c1,c2) -> mk_and (reset cl c1) (reset cl c2)
+  | Or(c1,c2) -> mk_or (reset cl c1) (reset cl c2)
+
 type transition = {
     src: int;
     dst: int;
@@ -67,6 +88,31 @@ type automaton = {
     invs: (int*ctr) list;
     trans: transition list;
   }
+
+(**** invariant propagation ****)
+
+let propagate_t2s a =
+  { a with
+    invs = List.map (fun (s,c) ->
+               let tl = List.filter (fun t -> t.src = s) a.trans in
+               let g = mk_orl (List.map (fun t -> upper t.guard) tl) in
+               (s, mk_and c g))
+             a.invs
+  }
+
+let propagate_s2t a =
+  { a with
+    trans = List.map (fun t ->
+                try 
+                  let i = List.assoc t.dst a.invs in
+                  {t with guard = mk_and t.guard (reset t.reset i)}
+                with Not_found -> t)
+              a.trans
+  }
+
+let rec propagate a =
+  let a' = propagate_s2t (propagate_t2s a) in
+  if a=a' then a else propagate a'
 
 (**** merge synchronous clocks ****)
 

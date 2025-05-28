@@ -227,7 +227,7 @@ let rec incr_clks = function
 let get_inv_tr (_,_,g,_) = rm_gt g
 
 let get_inv_st (s,_,tl) =
-  (s, mk_orl (List.map get_inv_tr tl))
+  (s, mk_orl (List.sort_uniq compare (List.map get_inv_tr tl)))
 
 let get_inv (_,_,stl) =
   List.filter (fun (_,g) -> g<>True) (List.map get_inv_st stl)

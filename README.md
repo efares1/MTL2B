@@ -29,6 +29,7 @@ git push -uf origin main
 ## Execute
 ```
   _build/install/default/bin/mtl2x.exe -xta feux.mtl
+  _build/install/default/bin/mtl2x.exe -c -pr -xta feux2.mtl
 ```
 ## Integrate with your tools
 

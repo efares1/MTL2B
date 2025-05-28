@@ -15,9 +15,10 @@ let parse_with_error lexbuf =
     Printf.fprintf stderr "%a: syntax error\n" print_position lexbuf;
     exit (-1)
 
-let usage_msg = "lbtt2b [-q] [-cr] [-dta <out.dot>] [-xta <out.xta>] [-b <outb.mch>] [-evb <out.mch>]"
+let usage_msg = "lbtt2b [-q] [-cr] [-pr] [-dta <out.dot>] [-xta <out.xta>] [-b <outb.mch>] [-evb <out.mch>]"
 let verbose = ref true
 let cropt = ref false
+let prinv = ref false
 let dta_file = ref ""
 let xta_file = ref ""
 let xtaraw_file = ref ""
@@ -33,6 +34,7 @@ let speclist = [
     ("-name", Arg.Set_string name, "automaton name");
     ("-alpha", Arg.Set_string alpha, "automaton alphabet completion (w1,...,wn)");
     ("-cr", Arg.Set cropt, "clock reduction optimization");
+    ("-pr", Arg.Set prinv, "invariant propagation");
     ("-b", Arg.Set_string b_file, "output timed automaton in B format");
     ("-evb", Arg.Set_string evb_file, "output timed automaton in EVB format")
   ]
@@ -50,8 +52,13 @@ let _ =
   if !verbose then Printf.fprintf stdout "etape 2 [add RST]: %a" Lbtt.pp_auto a;
   let alpha = String.split_on_char ',' !alpha in
   let ta = if alpha=[] then Lbtt2ta.lbtt2ta a else Lbtt2ta.lbtt2ta ?alpha:(Some alpha) a in
+  if !verbose then Printf.fprintf stdout "etape 3 [to TA]: %a" Ta.ppb_auto ta;
   let ta = if !cropt then Ta.rem_unused_resets ta else ta in 
+  if !verbose then Printf.fprintf stdout "etape 4 [rm RST]: %a" Ta.ppb_auto ta;
   let ta = if !cropt then Ta.rem_sync_clks ta else ta in 
+  if !verbose then Printf.fprintf stdout "etape 5 [mrg CLK]: %a" Ta.ppb_auto ta;
+  let ta = if !prinv then Ta.propagate ta else ta in 
+  if !verbose then Printf.fprintf stdout "etape 6 [propagate]: %a" Ta.ppb_auto ta;
   if (!dta_file <> "") then (
     let out = open_out !dta_file in
     Ta.ppd_auto out ta;

@@ -8,8 +8,8 @@ let rec lbtt2ta_ctr = function
     Lbtt.True -> Ta.True
   | Lbtt.False -> Ta.False
   | Lbtt.Clk(x,op,d) -> Ta.Clk(x,lbtt2ta_op op,d)
-  | Lbtt.And(c1,c2) -> Ta.And(lbtt2ta_ctr c1,lbtt2ta_ctr c2)
-  | Lbtt.Or(c1,c2) -> Ta.Or(lbtt2ta_ctr c1,lbtt2ta_ctr c2)
+  | Lbtt.And(c1,c2) -> Ta.mk_and (lbtt2ta_ctr c1) (lbtt2ta_ctr c2)
+  | Lbtt.Or(c1,c2) -> Ta.mk_or (lbtt2ta_ctr c1) (lbtt2ta_ctr c2)
   | _ -> failwith "lbtt2ta_ctr"
 
 

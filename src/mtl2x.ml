@@ -18,17 +18,19 @@ let parse_with_error lexbuf =
     Printf.fprintf stderr "%a: syntax error\n" print_position lexbuf;
     exit (-1)
 
-let usage_msg = "mtl2x [-q] [-ta] [-b] <input file.mtl>"
+let usage_msg = "mtl2x [-q] [-pr] [-ta] [-b] <input file.mtl>"
 let verbose = ref true
 let ta_out = ref false
 let xta_out = ref false
 let b_out = ref false
 let p_out = ref false
 let close_alpha = ref true
+let prinv = ref false
 
 let speclist =
   [("-q", Arg.Clear verbose, "no trace information");
    ("-c", Arg.Clear close_alpha, "don't close alphabet, don't add 'other' event");
+   ("-pr", Arg.Set prinv, "invariant propagation");
    ("-ta", Arg.Set ta_out, "output TA in dot/pdf format");
    ("-xta", Arg.Set xta_out, "output TA in XTA format");
    ("-b", Arg.Set b_out, "output TA in B format");
@@ -61,17 +63,19 @@ let xta_sync oc evts procs =
       Format.fprintf oc "\n "
     ) evts;
   Format.fprintf oc " L0;\n";
-  Format.fprintf oc "commit\n ";
-  List'.iteri (fun j e ->
-      List'.iteri (fun i p ->
-          if i<>np-1 then (
-            Format.fprintf oc " L%s%s" e p;
-            if i < np-2 || j<>ne-1 then Format.fprintf oc ","
-          )
-        ) procs;
-      if j=ne-1 then Format.fprintf oc ";\n"
-      else Format.fprintf oc "\n "
-    ) evts;
+  if List'.length procs > 1 then begin
+      Format.fprintf oc "commit\n ";
+      List'.iteri (fun j e ->
+          List'.iteri (fun i p ->
+              if i<>np-1 then (
+                Format.fprintf oc " L%s%s" e p;
+                if i < np-2 || j<>ne-1 then Format.fprintf oc ","
+              )
+            ) procs;
+          if j=ne-1 then Format.fprintf oc ";\n"
+          else Format.fprintf oc "\n "
+        ) evts
+    end;
   Format.fprintf oc "init L0;\n";
   Format.fprintf oc "trans\n ";
   List'.iteri (fun j e ->
@@ -137,6 +141,7 @@ let _ =
              |- run ltl2tgba ["--lbtt=t"; "-"]
              |- run lbtt2b
                   (["-cr"]
+                   @ (if !prinv then ["-pr"] else [])
                    @ (if !ta_out then ["-dta"; "out/"^nm^".dot"] else [])
                    @ (if !xta_out then ["-alpha"; alpha; "-name"; nm; "-xtaraw"; "out/"^nm^".xta"] else [])
                    @ ["-evb"; "out/"^nm^".mch"]
