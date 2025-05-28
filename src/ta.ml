@@ -104,8 +104,11 @@ let propagate_s2t a =
   { a with
     trans = List.map (fun t ->
                 try 
-                  let i = List.assoc t.dst a.invs in
-                  {t with guard = mk_and t.guard (reset t.reset i)}
+                  let inv_d = List.assoc t.dst a.invs in
+                  let g' = reset t.reset inv_d in
+                  let inv_s = try List.assoc t.src a.invs with _ -> True in
+                  if weaker g' inv_s then t
+                  else {t with guard = mk_and t.guard g'}
                 with Not_found -> t)
               a.trans
   }
