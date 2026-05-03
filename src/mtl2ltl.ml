@@ -41,10 +41,16 @@ let rec mtl2ltl = function
        (Ltl.Prop (Reset x))
        (Ltl.Until(mtl2ltl p1,
                   Ltl.mk_and (Ltl.Prop (Ctr(x,c))) (mtl2ltl p2)))
+  | Mtl.Until((LE _ | LT _) as c,p1,p2) as p ->
+     let x = getClk "u" p in
+     Ltl.Until(
+         (Ltl.mk_and
+            (Ltl.Prop (Ctr(x,c)))
+            (Ltl.mk_and (Ltl.Prop (Unch x)) (mtl2ltl p1))),
+         Ltl.mk_and (Ltl.Prop (Ctr(x,c))) (mtl2ltl p2))
   | Mtl.Until(Untimed,p1,p2) -> Ltl.Until(mtl2ltl p1, mtl2ltl p2)
-  | Mtl.Until((LE _ | LT _),_,_) -> failwith "Mtl.Until<= to ltl"
   | Mtl.XUntil((LE _ | LT _) as c,p1,p2) as p ->
-     let x = getClk "r" p in
+     let x = getClk "u" p in
      Ltl.Next (
          Ltl.Until(
              (Ltl.mk_and
@@ -52,16 +58,33 @@ let rec mtl2ltl = function
                 (Ltl.mk_and (Ltl.Prop (Unch x)) (mtl2ltl p1))),
              Ltl.mk_and (Ltl.Prop (Ctr(x,c))) (mtl2ltl p2)))
   | Mtl.XUntil((GE _ | GT _) as c,p1,p2) as p ->
-     let x = getClk "u" p in
+     let x = getClk "r" p in
      Ltl.mk_and
        (Ltl.Prop (Reset x))
        (Ltl.Next (Ltl.Until(mtl2ltl p1,
                              Ltl.mk_and (Ltl.Prop (Ctr(x,c))) (mtl2ltl p2))))
   | Mtl.XUntil(Untimed,p1,p2) -> Ltl.Next (Ltl.Until(mtl2ltl p1, mtl2ltl p2))
-  | Mtl.Release(Untimed,p1,p2) -> Ltl.Release(mtl2ltl p1, mtl2ltl p2)
-  | Mtl.Release(_,_,_) -> failwith "Release"
-  | Mtl.XRelease((LE _ | LT _) as c,p1,p2) as p ->
+  | Mtl.Release((LE _ | LT _) as c,p1,p2) as p ->
+     let x = getClk "r" p in
+     Ltl.mk_and
+       (Ltl.Prop (Reset x))
+       (Ltl.Release(
+            Ltl.mk_or (Ltl.Prop (Ctr(x, Mtl.ctr_not c))) (mtl2ltl p1),
+            Ltl.mk_or (Ltl.Prop (Ctr(x, Mtl.ctr_not c))) (mtl2ltl p2)))
+  | Mtl.Release((GE _ | GT _) as c,p1,p2) as p ->
      let x = getClk "u" p in
+     let p1 = mtl2ltl p1 in
+     let p2 = mtl2ltl p2 in
+     Ltl.Release(
+         p1,
+         Ltl.mk_and
+           (Ltl.Prop (Unch x))
+           (Ltl.mk_or
+              (Ltl.Prop (Ctr(x, Mtl.ctr_not c)))
+              p2))
+  | Mtl.Release(Untimed,p1,p2) -> Ltl.Release(mtl2ltl p1, mtl2ltl p2)
+  | Mtl.XRelease((LE _ | LT _) as c,p1,p2) as p ->
+     let x = getClk "r" p in
      Ltl.mk_and
          (Ltl.Prop (Reset x))
          (Ltl.Next
@@ -69,7 +92,7 @@ let rec mtl2ltl = function
                   Ltl.mk_or (Ltl.Prop (Ctr(x, Mtl.ctr_not c))) (mtl2ltl p1),
                   Ltl.mk_or (Ltl.Prop (Ctr(x, Mtl.ctr_not c))) (mtl2ltl p2))))
   | Mtl.XRelease((GE _ | GT _) as c,p1,p2) as p ->
-     let x = getClk "r" p in
+     let x = getClk "u" p in
      let p1 = mtl2ltl p1 in
      let p2 = mtl2ltl p2 in
      Ltl.mk_and

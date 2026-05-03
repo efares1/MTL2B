@@ -8,8 +8,8 @@ let rec lbtt2ta_ctr = function
     Lbtt.True -> Ta.True
   | Lbtt.False -> Ta.False
   | Lbtt.Clk(x,op,d) -> Ta.Clk(x,lbtt2ta_op op,d)
-  | Lbtt.And(c1,c2) -> Ta.mk_and (lbtt2ta_ctr c1) (lbtt2ta_ctr c2)
-  | Lbtt.Or(c1,c2) -> Ta.mk_or (lbtt2ta_ctr c1) (lbtt2ta_ctr c2)
+  | Lbtt.And(c1,c2) -> Ta.And(lbtt2ta_ctr c1,lbtt2ta_ctr c2)
+  | Lbtt.Or(c1,c2) -> Ta.Or(lbtt2ta_ctr c1,lbtt2ta_ctr c2)
   | _ -> failwith "lbtt2ta_ctr"
 
 
@@ -19,18 +19,20 @@ let lbtt2ta_evt a init invs ev =
   let acts = Lbtt.combine_trs trs in
   List.map
     (fun ((d,a,m),l) ->
-      List.map (fun (s,g) ->
-          let inv = try List.assoc s invs with _ -> Lbtt.True in
-          let g' = lbtt2ta_ctr (Lbtt.rewrite_hyp inv g) in
-          Ta.{src=swap s;dst=swap d;mark=m;event=ev;guard=g';reset=a}
-        ) l
+      let lt = List.map (fun (s,g) ->
+                   let inv = try List.assoc s invs with _ -> Lbtt.True in
+                   let g' = lbtt2ta_ctr (Lbtt.rewrite_hyp inv g) in
+                   Ta.{src=swap s;dst=swap d;mark=m;event=ev;guard=g';reset=a}
+                 ) l in
+      List.filter (fun t ->
+          not Ta.(t.src=t.dst && t.event="")) lt
     ) acts
 
 let lbtt2ta ?(alpha=["others"]) ((nst,typ,_) as a) : Ta.automaton =
   let clks = Lbtt.get_clk a in
   let invs = Lbtt.get_inv a in
   let init = Lbtt.get_init a in
-  let events = List.sort_uniq compare (alpha@(List.filter ((<>) "_init_") (Lbtt.get_evts a))) in
+  let events = List.sort_uniq compare (List.filter (fun l -> l <> "_init_") (alpha@Lbtt.get_evts a)) in
   let start =
     List.map (fun (_,d,_,_,_) -> d)
        (List.filter (fun (s,_,_,_,_) -> s=init)

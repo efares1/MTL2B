@@ -18,23 +18,25 @@ let parse_with_error lexbuf =
     Printf.fprintf stderr "%a: syntax error\n" print_position lexbuf;
     exit (-1)
 
-let usage_msg = "mtl2x [-q] [-pr] [-ta] [-b] <input file.mtl>"
+let usage_msg = "mtl2x [-q] [-ta] [-b] [-evb] [-name <formula name>] (-f \"mtl formula\" | <input file.mtl>)"
 let verbose = ref true
 let ta_out = ref false
 let xta_out = ref false
 let b_out = ref false
-let p_out = ref false
-let close_alpha = ref true
-let prinv = ref false
+let evb_out = ref false
+let mtl_in = ref ""
+let ext_alpha = ref ""
+let mtl_name = ref "mtl"
 
 let speclist =
   [("-q", Arg.Clear verbose, "no trace information");
-   ("-c", Arg.Clear close_alpha, "don't close alphabet, don't add 'other' event");
-   ("-pr", Arg.Set prinv, "invariant propagation");
+   ("-alpha", Arg.Set_string ext_alpha, "alphabet extension w1,...,wn");
    ("-ta", Arg.Set ta_out, "output TA in dot/pdf format");
    ("-xta", Arg.Set xta_out, "output TA in XTA format");
    ("-b", Arg.Set b_out, "output TA in B format");
-   ("-p", Arg.Set p_out, "output TA product in EVB format")
+   ("-evb", Arg.Set evb_out, "output TA product in EVB format");
+   ("-name", Arg.Set_string mtl_name, "MTL formula name");
+   ("-f", Arg.Set_string mtl_in, "MTL formula");
   ]
 let input_files = ref []
 let anon_fun filename = input_files := filename::!input_files
@@ -63,19 +65,18 @@ let xta_sync oc evts procs =
       Format.fprintf oc "\n "
     ) evts;
   Format.fprintf oc " L0;\n";
-  if List'.length procs > 1 then begin
-      Format.fprintf oc "commit\n ";
-      List'.iteri (fun j e ->
-          List'.iteri (fun i p ->
-              if i<>np-1 then (
-                Format.fprintf oc " L%s%s" e p;
-                if i < np-2 || j<>ne-1 then Format.fprintf oc ","
-              )
-            ) procs;
-          if j=ne-1 then Format.fprintf oc ";\n"
-          else Format.fprintf oc "\n "
-        ) evts
-    end;
+  if ne > 0 && np > 1 then
+    Format.fprintf oc "commit\n ";
+  List'.iteri (fun j e ->
+      List'.iteri (fun i p ->
+          if i<>np-1 then (
+            Format.fprintf oc " L%s%s" e p;
+            if i < np-2 || j<>ne-1 then Format.fprintf oc ","
+          )
+        ) procs;
+      if j=ne-1 then Format.fprintf oc ";\n"
+      else Format.fprintf oc "\n "
+    ) evts;
   Format.fprintf oc "init L0;\n";
   Format.fprintf oc "trans\n ";
   List'.iteri (fun j e ->
@@ -103,11 +104,19 @@ let xta_sync oc evts procs =
 
 let _ =
   Arg.parse speclist anon_fun usage_msg;
-  if (List'.length !input_files <> 1) then (
+  if (!mtl_in <> "" && !input_files <> []) then (
+    Printf.eprintf "No input file if '-f'\nUsage: %s\n" usage_msg;
+    exit (-1)
+  );
+  if (!mtl_in = "" && List'.length !input_files <> 1) then (
     Printf.eprintf "Usage: %s\n" usage_msg;
     exit (-1)
   );
-  let lexbuf = Lexing.from_channel (open_in (List'.hd !input_files)) in
+  let lexbuf =
+    if !mtl_in <> "" then
+      Lexing.from_string ("@" ^ !mtl_name ^ " " ^ !mtl_in)
+    else
+      Lexing.from_channel (open_in (List'.hd !input_files)) in
   let fl = parse_with_error lexbuf in
   let mtl2ltl = "_build/install/default/bin/mtl2ltl.exe" in
   let lbtt2b = "_build/install/default/bin/lbtt2b.exe" in
@@ -124,10 +133,11 @@ let _ =
     Printf.eprintf "ltl2tgba not found";
     exit (-1)
   );
-  let alpha =
-    String.concat ","
-      ((if !close_alpha then ["other"] else []) @
-         (List'.sort_uniq compare (List'.concat_map (fun (_,m) -> Mtl.get_evts m) fl))) in
+  let alpha = String.concat ","
+                (List'.sort_uniq compare
+                   ((String.split_on_char ',' !ext_alpha) @
+                      (List'.concat_map (fun (_,m) -> Mtl.get_evts m) fl)))
+  in
   let main =
     mkdir ~p:() "out" >>
     List.iter fl
@@ -135,13 +145,10 @@ let _ =
         let f = Format.asprintf "%a" Mtl.pp_mtl mtl in
         ((if !verbose then echo f else return ())
          >> (echo f
-             |- run mtl2ltl
-                  ((if !verbose then [] else ["-q"])
-                   @ (if !close_alpha then [] else ["-c"]))
+             |- run mtl2ltl (if !verbose then [] else ["-q"])
              |- run ltl2tgba ["--lbtt=t"; "-"]
              |- run lbtt2b
                   (["-cr"]
-                   @ (if !prinv then ["-pr"] else [])
                    @ (if !ta_out then ["-dta"; "out/"^nm^".dot"] else [])
                    @ (if !xta_out then ["-alpha"; alpha; "-name"; nm; "-xtaraw"; "out/"^nm^".xta"] else [])
                    @ ["-evb"; "out/"^nm^".mch"]
@@ -151,7 +158,7 @@ let _ =
         >> if !ta_out then run "dot" ["-T";"pdf"; "out/"^nm^".dot"; "-oout/"^nm^".pdf"] else return ()
       ) in
   eval main;
-  if (!p_out) then (
+  if (!evb_out) then (
     let out = Format.formatter_of_out_channel (open_out "out/product.mch") in
     Mtl.ppp_mtl out "product" fl
   );
@@ -160,7 +167,7 @@ let _ =
     let sync = "out/sync.xta" in
     let header = "out/header.xta" in
     let procs = List'.map fst fl in
-    let alpha = String.split_on_char ',' alpha in
+    let alpha = List'.filter ((<>) "") (String.split_on_char ',' alpha) in
     let _ =
       let out = Format.formatter_of_out_channel (open_out sync) in
       xta_sync out alpha procs in

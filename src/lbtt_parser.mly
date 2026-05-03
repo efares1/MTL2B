@@ -1,6 +1,7 @@
 (*http://www.tcs.hut.fi/Software/lbtt/doc/html/Format-for-automata.html*)
 %{
-    open Lbtt
+  open Lbtt
+  open Clkctr
 %}
 %token <int> INT
 %token <string> ST
