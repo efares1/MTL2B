@@ -1,14 +1,38 @@
 type op = LE | LT | GE | GT
+
+let opp_op = function
+    LE -> GE
+  | LT -> GT
+  | GE -> LE
+  | GT -> LT
+
+let not_op = function
+    LE -> GT
+  | LT -> GE
+  | GE -> LT
+  | GT -> LE
+
 type ctr =
   True
 | False
 | Clk of string * op * int
+| Diff of string * string * op * int
 | And of ctr*ctr
 | Or of ctr*ctr
+
+let rec mk_not = function
+    True -> False
+  | False -> True
+  | Clk(x,op,k) -> Clk(x,not_op op,k)
+  | Diff(x,y,op,k) -> Diff(x,y,not_op op,k)
+  | And(c1,c2) -> Or(mk_not c1, mk_not c2)
+  | Or(c1,c2) -> And(mk_not c1, mk_not c2)
 
 let rm_eq = function
     Clk(x,LE,d) -> Clk(x,LT, d+1)
   | Clk(x,GE,d) -> Clk(x,GT, d-1)
+  | Diff(x,y,LE,d) -> Diff(x,y,LT,d+1)
+  | Diff(x,y,GE,d) -> Diff(x,y,GT,d-1)
   | c -> c
 
 let contradict c1 c2 =
@@ -19,14 +43,17 @@ let contradict c1 c2 =
   | _, False -> true
   | _ -> false
 
+(* |- c2 => |- c1 *)
 let rec weaker c1 c2 =
   match rm_eq c1, rm_eq c2 with
     Clk(x,LT,d1), Clk(x',LT,d2) -> x=x' && d1 >= d2
   | Clk(x,GT,d1), Clk(x',GT,d2) -> x=x' && d2 >= d1
   | True, _ -> true
   | _, False -> true
-  | c1, And(c21, c22) -> weaker c1 c21 || weaker c1 c22
   | And(c11,c12), c2 -> weaker c11 c2 && weaker c12 c2
+  | Or(c11,c12), c2 -> weaker c11 c2 || weaker c12 c2
+  | c1, And(c21, c22) -> weaker c1 c21 || weaker c1 c22
+  | c1, Or(c21, c22) -> weaker c1 c21 && weaker c1 c22
   | c1,c2 -> c1=c2
 
 let mk_and c1 c2 =
@@ -68,6 +95,39 @@ type automaton = {
     trans: transition list;
   }
 
+let get_inv st a =
+  try List.assoc st a.invs with Not_found -> True
+
+(**** reset clocks ****)
+
+let rec do_reset l = function
+    True -> True
+  | False -> False
+  | And(c1,c2) -> mk_and (do_reset l c1) (do_reset l c2)
+  | Or(c1,c2) -> mk_or (do_reset l c1) (do_reset l c2)
+  | Diff(x,y,op,k) when List.mem y l -> do_reset l (Clk(x,op,k))
+  | Diff(x,y,op,k) when List.mem x l -> do_reset l (Clk(y,opp_op op,~- k))
+  | Diff(_,_,_,_) as c -> c
+  | Clk(_,LT,k) when k <= 0 -> False
+  | Clk(_,LE,k) when k < 0 -> False
+  | Clk(_,GT,k) when k < 0 -> True
+  | Clk(_,GE,k) when k <= 0 -> True
+  | Clk(x,_,_) as c when not (List.mem x l) -> c
+  | Clk(_,LT,k) -> if k<=0 then False else True
+  | Clk(_,LE,_) -> True
+  | Clk(_,GT,_) -> False
+  | Clk(_,GE,k) -> if k<=0 then True else False
+
+let rec simpl_when p c =
+  if weaker c p then True
+  else if contradict c p then False else
+  match c with
+    True -> True
+  | False -> False
+  | And(c1,c2) -> mk_and (simpl_when p c1) (simpl_when p c2)
+  | Or(c1,c2) -> mk_or (simpl_when p c1) (simpl_when p c2)
+  | _ -> c
+
 (**** merge synchronous clocks ****)
 
 let same_clks_tr c1 c2 tr =
@@ -93,6 +153,7 @@ let rec rename_dups_ctr dups = function
     True -> True
   | False -> False
   | Clk(x,op,d) -> Clk(rename_dups_clk dups x,op,d)
+  | Diff(x,y,op,d) -> Diff(rename_dups_clk dups x,rename_dups_clk dups y,op,d)
   | And(c1,c2) -> mk_and (rename_dups_ctr dups c1) (rename_dups_ctr dups c2)
   | Or(c1,c2) -> mk_or (rename_dups_ctr dups c1) (rename_dups_ctr dups c2)
 
@@ -137,6 +198,7 @@ let rec get_clocks = function
     True -> []
   | False -> []
   | Clk(x,_,_) -> [x]
+  | Diff(x,y,_,_) -> [x;y]
   | And(c1,c2) -> List.sort_uniq compare (get_clocks c1 @ get_clocks c2)
   | Or(c1,c2) -> List.sort_uniq compare (get_clocks c1 @ get_clocks c2)
 
@@ -153,6 +215,90 @@ let rem_unused_resets a =
       a.trans in
   {a with trans = ntrs}
 
+(***************** eliminate disjunctive invariants ***************)
+
+let isDisj c =
+  match c with Or(_,_) -> true | _ -> false
+
+let rec getDisj c =
+  match c with
+    Or(c1,c2) -> getDisj c1 @ getDisj c2
+  | c -> [c]
+
+let rec getConj c =
+  match c with
+    And(c1,c2) -> getConj c1 @ getConj c2
+  | c -> [c]
+
+let mk_guard ik ils =
+  let ik = getConj ik and ils = List.map getConj ils in
+  mk_andl (List.map (fun il ->
+               mk_not
+                 (mk_orl (List.map (function
+                                Clk(c,LT,m) ->
+                                 mk_andl (List.map (function
+                                                Clk(c',op,m') -> Diff(c',c,op,m'-m)
+                                              | _ -> assert false
+                                            ) il)
+                              | Clk(c,LE,m) ->
+                                 mk_andl (List.map (function
+                                                Clk(c',_,m') -> Diff(c',c,LT,m'-m)
+                                              | _ -> assert false
+                                  ) il)
+                              | _ -> assert false
+                            ) ik))) ils)
+
+let elim_disj a =
+  let n = ref a.nbStates in
+  let tr = ref [] in
+  let invs = List.filter (fun (_, c) -> isDisj c) a.invs in
+
+  let ninvs =
+    List.fold_left
+      (fun r (st, inv) ->
+        let loop_st = List.filter (fun t -> t.src=st&&t.dst=st) a.trans in
+        let to_st = List.filter (fun t -> t.src<>st&&t.dst=st) a.trans in
+        let from_st = List.filter (fun t -> t.src=st&&t.dst<>st) a.trans in
+        let di = getDisj inv in
+        List.iter (fun t ->
+            List.iteri (fun i d ->
+                let ni = if i=0 then st else !n+i in
+                List.iteri (fun j d' ->
+                    let nj = if j=0 then st else !n+j in
+                    let di' = List.filter (fun x -> x <> d') di in
+                    let t' =
+                      {t with src=ni;dst=nj;
+                              guard=mk_and t.guard (do_reset t.reset (mk_and d (mk_guard d' di')))} in
+                    tr := t'::!tr
+                  ) di
+              ) di
+          ) loop_st;
+        List.fold_left (fun r d ->
+            let di' = List.filter (fun x -> x <> d) di in
+            let nst = if d = List.hd di then st else (incr n; !n) in
+            tr :=
+              List.map (fun t -> {t with dst = nst; guard=mk_and t.guard (do_reset t.reset (mk_and d (mk_guard d di')))}) to_st @
+                List.map (fun t -> {t with src = nst}) from_st @
+                  !tr;
+            (nst, d)::r
+          ) r di
+      ) [] invs in
+  let di_states = List.map fst (List.filter (fun (_, c) -> isDisj c) a.invs) in
+  let invs = List.filter (fun (_, c) -> not (isDisj c)) a.invs in
+  let trans = List.filter
+                (fun t -> not (List.mem t.src di_states) &&
+                            not (List.mem t.dst di_states)) a.trans in
+  let ninvs = invs @ ninvs in
+  let ntrans =
+    let a' = {a with invs = ninvs} in
+    List.map (fun t ->
+                   {t with guard = simpl_when (get_inv t.src a') t.guard})
+      (trans @ !tr) in
+  let ntrans = List.filter (fun t -> t.guard <> False) ntrans in
+  {a with nbStates = !n;
+          invs = ninvs;
+          trans = List.sort_uniq compare ntrans}
+
 (***************** B printer ***************)
 
 let ppb_op oc = function
@@ -165,6 +311,7 @@ let rec incr_clks = function
     True -> True
   | False -> False
   | Clk(x,op,d) -> Clk(x,op,d-1)
+  | Diff(_,_,_,_) as c -> c
   | And(c1,c2) -> And(incr_clks c1, incr_clks c2)
   | Or(c1,c2) -> Or(incr_clks c1, incr_clks c2)
 
@@ -172,6 +319,7 @@ let rec ppb_ctr oc = function
     True -> Printf.fprintf oc "true"
   | False -> Printf.fprintf oc "false"
   | Clk(x,op,d) -> Printf.fprintf oc "%s %a %d" x ppb_op op d
+  | Diff(x,y,op,d) -> Printf.fprintf oc "%s-%s %a %d" x y ppb_op op d
   | And(c1,c2) -> Printf.fprintf oc "%a & %a" ppb_ctr c1 ppb_ctr c2
   | Or(c1,c2) -> Printf.fprintf oc "%a or %a" ppb_ctr c1 ppb_ctr c2
 
@@ -259,6 +407,7 @@ let rec ppevb_ctr oc = function
     True -> Printf.fprintf oc "⊤"
   | False -> Printf.fprintf oc "⊥"
   | Clk(x,op,d) -> Printf.fprintf oc "%s %a %d" x ppevb_op op d
+  | Diff(x,y,op,d) -> Printf.fprintf oc "%s - %s %a %d" x y ppevb_op op d
   | And(c1,c2) -> Printf.fprintf oc "%a ∧ %a" ppevb_ctr c1 ppevb_ctr c2
   | Or(c1,c2) -> Printf.fprintf oc "%a ∨ %a" ppevb_ctr c1 ppevb_ctr c2
 
@@ -331,6 +480,7 @@ let rec pp_ctr oc = function
     True -> Printf.fprintf oc "true"
   | False -> Printf.fprintf oc "false"
   | Clk(x,op,d) -> Printf.fprintf oc "%s%s%d" x (pp_op op) d
+  | Diff(x,y,op,d) -> Printf.fprintf oc "%s-%s%s%d" x y (pp_op op) d
   | And(c1,c2) -> Printf.fprintf oc "%a && %a" pp_ctr c1 pp_ctr c2
   | Or(c1,c2) -> Printf.fprintf oc "%a || %a" pp_ctr c1 pp_ctr c2
 
@@ -378,6 +528,7 @@ let rec ppx_ctr oc = function
     True -> Format.fprintf oc "true"
   | False -> Format.fprintf oc "false"
   | Clk(x,op,d) -> Format.fprintf oc "%s%s%d" x (ppx_op op) d
+  | Diff(x,y,op,d) -> Format.fprintf oc "%s-%s%s%d" x y (ppx_op op) d
   | And(c1,c2) -> Format.fprintf oc "%a && %a" ppx_ctr c1 ppx_ctr c2
   | Or(c1,c2) -> Format.fprintf oc "%a || %a" ppx_ctr c1 ppx_ctr c2
 

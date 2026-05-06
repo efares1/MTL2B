@@ -18,6 +18,7 @@ let parse_with_error lexbuf =
 let usage_msg = "lbtt2b [-q] [-cr] [-dta <out.dot>] [-xta <out.xta>] [-b <outb.mch>] [-evb <out.mch>]"
 let verbose = ref true
 let cropt = ref false
+let elim_di = ref false
 let dta_file = ref ""
 let xta_file = ref ""
 let xtaraw_file = ref ""
@@ -33,6 +34,7 @@ let speclist = [
     ("-name", Arg.Set_string name, "automaton name");
     ("-alpha", Arg.Set_string alpha, "automaton alphabet completion (w1,...,wn)");
     ("-cr", Arg.Set cropt, "clock reduction optimization");
+    ("-di", Arg.Set elim_di, "remove disjunctive invariants");
     ("-b", Arg.Set_string b_file, "output timed automaton in B format");
     ("-evb", Arg.Set_string evb_file, "output timed automaton in EVB format")
   ]
@@ -52,6 +54,7 @@ let _ =
   let ta = if alpha=[] then Lbtt2ta.lbtt2ta a else Lbtt2ta.lbtt2ta ?alpha:(Some alpha) a in
   let ta = if !cropt then Ta.rem_unused_resets ta else ta in 
   let ta = if !cropt then Ta.rem_sync_clks ta else ta in 
+  let ta = if !elim_di then Ta.elim_disj ta else ta in 
   if (!dta_file <> "") then (
     let out = open_out !dta_file in
     Ta.ppd_auto out ta;

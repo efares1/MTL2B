@@ -24,6 +24,7 @@ let ta_out = ref false
 let xta_out = ref false
 let b_out = ref false
 let evb_out = ref false
+let elim_di = ref false
 let mtl_in = ref ""
 let ext_alpha = ref ""
 let mtl_name = ref "mtl"
@@ -31,6 +32,7 @@ let mtl_name = ref "mtl"
 let speclist =
   [("-q", Arg.Clear verbose, "no trace information");
    ("-alpha", Arg.Set_string ext_alpha, "alphabet extension w1,...,wn");
+   ("-di", Arg.Set elim_di, "eliminate disjunctive invariants");
    ("-ta", Arg.Set ta_out, "output TA in dot/pdf format");
    ("-xta", Arg.Set xta_out, "output TA in XTA format");
    ("-b", Arg.Set b_out, "output TA in B format");
@@ -146,9 +148,10 @@ let _ =
         ((if !verbose then echo f else return ())
          >> (echo f
              |- run mtl2ltl (if !verbose then [] else ["-q"])
-             |- run ltl2tgba ["--lbtt=t"; "-"]
+             |- run ltl2tgba ["-D"; "--lbtt=t"; "-"]
              |- run lbtt2b
                   (["-cr"]
+                   @ (if !elim_di then ["-di"] else [])
                    @ (if !ta_out then ["-dta"; "out/"^nm^".dot"] else [])
                    @ (if !xta_out then ["-alpha"; alpha; "-name"; nm; "-xtaraw"; "out/"^nm^".xta"] else [])
                    @ ["-evb"; "out/"^nm^".mch"]
