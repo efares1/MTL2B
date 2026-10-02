@@ -6,6 +6,11 @@
   Identical timed subformulas at different syntax-tree paths use the same
   formula-keyed clock. Paths are retained only for structural occurrence lookup.
 
+  Clocks have type [Clock root], the timed subformulas of the initial
+  formula.  The canonical extension [canonical_ext root w : ext_word root]
+  evaluates its reset policy at the timed formula [proj1_sig x] naming
+  each clock [x].
+
   IMPORTANT:
   - This file introduces NO new Axiom, Parameter, Hypothesis, Variable,
     Admitted, admit, or Abort.
@@ -13,6 +18,8 @@
   - The proof treats <=, >=, <, and > directly over real-valued time.
     Strict guards remain strict throughout; no transformation of a strict
     comparison into a non-strict comparison by modifying the bound is used.
+  - The concrete Buchi interface uses proposition letters plus explicit
+    lists of clock constraints; timed data are not fields of a letter.
   - The proof strategy follows the canonical extended-word construction:
       upper-bounded Until / lower-bounded Release preserve the oldest
       still-relevant reference; the dual families may restart it.
@@ -38,6 +45,10 @@ Open Scope R_scope.
 
 Set Implicit Arguments.
 Unset Strict Implicit.
+
+
+Definition Rle_dec' x y : x <= y \/ ~(x <= y) := classic (x <= y).
+Definition Rlt_dec' x y : x < y \/ ~(x < y) := classic (x < y).
 
 (* ====================================================================== *)
 (* 1. Structural occurrence lookup                                       *)
@@ -87,16 +98,16 @@ Qed.
 (* Shared clock key of a syntactic occurrence.  Valid occurrences carrying
    syntactically identical formulas map to the same [Clock], independently
    of their syntax-tree paths. *)
-Definition clock_at (root : mtl) (path : Path) : Clock :=
+Definition clock_at (root : mtl) (path : Path) : option (Clock root) :=
   match node_at root path with
-  | Some f => clock_of f
-  | None => clock_of MTrue
+  | Some f => clock_of root f
+  | None => None
   end.
 
 Lemma clock_at_node :
   forall root path f,
     node_at root path = Some f ->
-    clock_at root path = clock_of f.
+    clock_at root path = clock_of root f.
 Proof.
   intros root path f H.
   unfold clock_at. rewrite H. reflexivity.
@@ -121,8 +132,25 @@ Example duplicated_nested_formula_shares_clock :
     let root := MAnd F (MNext F) in
     clock_at root [false] = clock_at root [true; false].
 Proof.
-  intros d a b.
-  reflexivity.
+  intros d a b F root.
+  apply identical_nodes_share_clock with (f := F); reflexivity.
+Qed.
+
+(* The timed subformulas of a located subformula are timed subformulas
+   of the root; in particular a located timed formula is a clock of root. *)
+Lemma node_at_timed_incl :
+  forall path root f,
+    node_at root path = Some f ->
+    incl (timed_subformulas f) (timed_subformulas root).
+Proof.
+  induction path as [|b tl IH]; intros root f Hnode.
+  - rewrite node_at_nil in Hnode. injection Hnode as <-.
+    intros y Hy; exact Hy.
+  - destruct root; simpl in Hnode; try discriminate;
+      destruct b; try discriminate;
+      intros y Hy; simpl;
+      repeat rewrite in_app_iff;
+      specialize (IH _ _ Hnode y Hy); tauto.
 Qed.
 
 Lemma node_at_left :
@@ -305,7 +333,7 @@ Qed.
 
 Definition reset_policy
     (_root : mtl) (w : timed_word)
-    (x : Clock) (i : nat) (v : R) : bool :=
+    (x : mtl) (i : nat) (v : R) : bool :=
   match x with
   | MUhatLe d p q =>
       negb (decide
@@ -347,7 +375,7 @@ Definition reset_policy
   end.
 
 Fixpoint canonical_val
-    (root : mtl) (w : timed_word) (x : Clock) (n : nat) : R :=
+    (root : mtl) (w : timed_word) (x : mtl) (n : nat) : R :=
   match n with
   | O => 0
   | S i =>
@@ -358,13 +386,15 @@ Fixpoint canonical_val
   end.
 
 Definition canonical_reset
-    (root : mtl) (w : timed_word) (i : nat) (x : Clock) : bool :=
+    (root : mtl) (w : timed_word) (i : nat) (x : mtl) : bool :=
   reset_policy root w x i (canonical_val root w x i).
 
-Definition canonical_ext (root : mtl) (w : timed_word) : ext_word :=
+(* The canonical extension is an extended word over [Clock root]; the
+   policy is evaluated at the timed formula [proj1_sig x] naming clock [x]. *)
+Definition canonical_ext (root : mtl) (w : timed_word) : ext_word root :=
   {| ew_base := w;
-     ew_val := fun i x => canonical_val root w x i;
-     ew_reset := fun i x => canonical_reset root w i x |}.
+     ew_val := fun i x => canonical_val root w (proj1_sig x) i;
+     ew_reset := fun i x => canonical_reset root w i (proj1_sig x) |}.
 
 Lemma canonical_val_nonnegative :
   forall root w x i,
@@ -391,7 +421,8 @@ Proof.
     simpl.
     unfold canonical_reset.
     simpl.
-    destruct (reset_policy root w x i (canonical_val root w x i));
+    destruct (reset_policy root w (proj1_sig x) i
+                (canonical_val root w (proj1_sig x) i));
       reflexivity.
 Qed.
 
@@ -405,26 +436,31 @@ Qed.
 (* Two distinct occurrence paths carrying exactly the same subformula use
    literally the same canonical clock trace. *)
 Lemma identical_nodes_share_canonical_trace :
-  forall root w p1 p2 f i,
+  forall root w p1 p2 f i (x1 x2 : Clock root),
     node_at root p1 = Some f ->
     node_at root p2 = Some f ->
-    canonical_val root w (clock_at root p1) i =
-    canonical_val root w (clock_at root p2) i /\
-    canonical_reset root w i (clock_at root p1) =
-    canonical_reset root w i (clock_at root p2).
+    clock_at root p1 = Some x1 ->
+    clock_at root p2 = Some x2 ->
+    x1 = x2 /\
+    ew_val (canonical_ext root w) i x1 = ew_val (canonical_ext root w) i x2 /\
+    ew_reset (canonical_ext root w) i x1 = ew_reset (canonical_ext root w) i x2.
 Proof.
-  intros root w p1 p2 f i H1 H2.
+  intros root w p1 p2 f i x1 x2 H1 H2 Hx1 Hx2.
   pose proof (identical_nodes_share_clock H1 H2) as Hclock.
-  rewrite Hclock.
-  split; reflexivity.
+  rewrite Hclock, Hx2 in Hx1.
+  injection Hx1 as ->.
+  repeat split; reflexivity.
 Qed.
+
+Section GenericClocks.
+Variable root : mtl.
 
 (* ====================================================================== *)
 (* 4. General clock arithmetic                                           *)
 (* ====================================================================== *)
 
 Lemma reset_step :
-  forall rho i x,
+  forall (rho : ext_word root) i x,
     clock_consistent rho ->
     rst_at rho x i ->
     ew_val rho (S i) x = delta (ew_base rho) i.
@@ -437,7 +473,7 @@ Proof.
 Qed.
 
 Lemma unch_step :
-  forall rho i x,
+  forall (rho : ext_word root) i x,
     clock_consistent rho ->
     unch_at rho x i ->
     ew_val rho (S i) x =
@@ -451,7 +487,7 @@ Proof.
 Qed.
 
 Lemma ext_val_nonnegative :
-  forall rho i x,
+  forall (rho : ext_word root) i x,
     clock_consistent rho ->
     0 <= ew_val rho i x.
 Proof.
@@ -460,7 +496,7 @@ Proof.
 Qed.
 
 Lemma preserve_accumulate :
-  forall rho i j x,
+  forall (rho : ext_word root) i j x,
     clock_consistent rho ->
     (i <= j)%nat ->
     (forall k:nat, (i <= k < j)%nat -> unch_at rho x k) ->
@@ -477,7 +513,7 @@ Proof.
 Qed.
 
 Lemma preserve_elapsed_le_value :
-  forall rho i j x,
+  forall (rho : ext_word root) i j x,
     clock_consistent rho ->
     (i <= j)%nat ->
     (forall k:nat, (i <= k < j)%nat -> unch_at rho x k) ->
@@ -490,7 +526,7 @@ Proof.
 Qed.
 
 Lemma after_reset_value_le_elapsed :
-  forall rho i j x,
+  forall (rho : ext_word root) i j x,
     clock_consistent rho ->
     rst_at rho x i ->
     (S i <= j)%nat ->
@@ -522,7 +558,7 @@ Qed.
 (* If the first clock step is followed only by unchanged steps, the clock
    value dominates the physical time elapsed from the preceding position. *)
 Lemma preserve_from_next_elapsed_le_value :
-  forall rho i j x,
+  forall (rho : ext_word root) i j x,
     clock_consistent rho ->
     (S i <= j)%nat ->
     (forall k : nat, (S i <= k < j)%nat -> unch_at rho x k) ->
@@ -554,7 +590,7 @@ Qed.
 (* With a reset at [i] and no later reset before [j], the clock at [j]
    is exactly the elapsed physical time since [i]. *)
 Lemma reset_preserve_value_eq_elapsed :
-  forall rho i j x,
+  forall (rho : ext_word root) i j x,
     clock_consistent rho ->
     rst_at rho x i ->
     (S i <= j)%nat ->
@@ -571,7 +607,7 @@ Proof.
 Qed.
 
 Lemma reset_lower_guard_sound :
-  forall rho i j x d,
+  forall (rho : ext_word root) i j x d,
     clock_consistent rho ->
     rst_at rho x i ->
     (S i <= j)%nat ->
@@ -585,7 +621,7 @@ Proof.
 Qed.
 
 Lemma reset_strict_lower_guard_sound :
-  forall rho i j x d,
+  forall (rho : ext_word root) i j x d,
     clock_consistent rho ->
     rst_at rho x i ->
     (S i <= j)%nat ->
@@ -600,7 +636,7 @@ Qed.
 
 
 Lemma preserve_upper_guard_sound :
-  forall rho i j x d,
+  forall (rho : ext_word root) i j x d,
     clock_consistent rho ->
     (i <= j)%nat ->
     (forall k:nat, (i <= k < j)%nat -> unch_at rho x k) ->
@@ -614,7 +650,7 @@ Proof.
 Qed.
 
 Lemma preserve_strict_upper_guard_sound :
-  forall rho i j x d,
+  forall (rho : ext_word root) i j x d,
     clock_consistent rho ->
     (i <= j)%nat ->
     (forall k:nat, (i <= k < j)%nat -> unch_at rho x k) ->
@@ -632,7 +668,7 @@ Qed.
 (* ====================================================================== *)
 
 Lemma LG_semantics :
-  forall rho i A,
+  forall (rho : ext_word root) i A,
     lsat rho i (LG A) <->
     forall j, (i <= j)%nat -> lsat rho j A.
 Proof.
@@ -650,7 +686,7 @@ Proof.
 Qed.
 
 Lemma LF_semantics :
-  forall rho i A,
+  forall (rho : ext_word root) i A,
     lsat rho i (LF A) <->
     exists j, (i <= j)%nat /\ lsat rho j A.
 Proof.
@@ -665,7 +701,7 @@ Proof.
 Qed.
 
 Lemma LGF_semantics :
-  forall rho i A,
+  forall (rho : ext_word root) i A,
     lsat rho i (LGF A) <->
     forall n, (i <= n)%nat ->
       exists j, (n <= j)%nat /\ lsat rho j A.
@@ -683,7 +719,7 @@ Proof.
 Qed.
 
 Lemma LW_semantics :
-  forall rho i A B,
+  forall (rho : ext_word root) i A B,
     lsat rho i (LW A B) <->
     (exists j,
        (i <= j)%nat /\
@@ -700,7 +736,7 @@ Proof.
 Qed.
 
 Lemma GF_far :
-  forall rho i d B,
+  forall (rho : ext_word root) i d B,
     0 <= d ->
     lsat rho i (LGF B) ->
     exists j,
@@ -721,6 +757,8 @@ Proof.
   lra.
 Qed.
 
+End GenericClocks.
+
 (* ====================================================================== *)
 (* 6. Canonical-policy facts for the eight primitive clock classes      *)
 (* ====================================================================== *)
@@ -729,7 +767,7 @@ Lemma policy_UhatGe_reset :
   forall root w path d p q i,
     node_at root path = Some (MUhatGe d p q) ->
     msat w i (MUhatGe d p q) ->
-    canonical_reset root w i (clock_of (MUhatGe d p q)) = true.
+    canonical_reset root w i ((MUhatGe d p q)) = true.
 Proof.
   intros.
   unfold canonical_reset, reset_policy.
@@ -742,7 +780,7 @@ Lemma policy_RhatLe_reset :
   forall root w path d p q i,
     node_at root path = Some (MRhatLe d p q) ->
     msat w i (MRhatLe d p q) ->
-    canonical_reset root w i (clock_of (MRhatLe d p q)) = true.
+    canonical_reset root w i ((MRhatLe d p q)) = true.
 Proof.
   intros.
   unfold canonical_reset, reset_policy.
@@ -754,10 +792,10 @@ Qed.
 Lemma policy_UhatLe_preserve :
   forall root w path d p q i,
     node_at root path = Some (MUhatLe d p q) ->
-    canonical_val root w (clock_of (MUhatLe d p q)) i <= d ->
-    ule_residual w i (canonical_val root w (clock_of (MUhatLe d p q)) i) d p q ->
+    canonical_val root w ((MUhatLe d p q)) i <= d ->
+    ule_residual w i (canonical_val root w ((MUhatLe d p q)) i) d p q ->
     ~ msat w i q ->
-    canonical_reset root w i (clock_of (MUhatLe d p q)) = false.
+    canonical_reset root w i ((MUhatLe d p q)) = false.
 Proof.
   intros.
   unfold canonical_reset, reset_policy.
@@ -770,10 +808,10 @@ Qed.
 Lemma policy_RhatGe_preserve :
   forall root w path d p q i,
     node_at root path = Some (MRhatGe d p q) ->
-    canonical_val root w (clock_of (MRhatGe d p q)) i < d ->
-    rge_residual w i (canonical_val root w (clock_of (MRhatGe d p q)) i) d p q ->
+    canonical_val root w ((MRhatGe d p q)) i < d ->
+    rge_residual w i (canonical_val root w ((MRhatGe d p q)) i) d p q ->
     ~ msat w i p ->
-    canonical_reset root w i (clock_of (MRhatGe d p q)) = false.
+    canonical_reset root w i ((MRhatGe d p q)) = false.
 Proof.
   intros.
   unfold canonical_reset, reset_policy.
@@ -787,7 +825,7 @@ Lemma policy_UhatGt_reset :
   forall root w path d p q i,
     node_at root path = Some (MUhatGt d p q) ->
     msat w i (MUhatGt d p q) ->
-    canonical_reset root w i (clock_of (MUhatGt d p q)) = true.
+    canonical_reset root w i ((MUhatGt d p q)) = true.
 Proof.
   intros.
   unfold canonical_reset, reset_policy.
@@ -800,7 +838,7 @@ Lemma policy_RhatLt_reset :
   forall root w path d p q i,
     node_at root path = Some (MRhatLt d p q) ->
     msat w i (MRhatLt d p q) ->
-    canonical_reset root w i (clock_of (MRhatLt d p q)) = true.
+    canonical_reset root w i ((MRhatLt d p q)) = true.
 Proof.
   intros.
   unfold canonical_reset, reset_policy.
@@ -812,10 +850,10 @@ Qed.
 Lemma policy_UhatLt_preserve :
   forall root w path d p q i,
     node_at root path = Some (MUhatLt d p q) ->
-    canonical_val root w (clock_of (MUhatLt d p q)) i < d ->
-    ult_residual w i (canonical_val root w (clock_of (MUhatLt d p q)) i) d p q ->
+    canonical_val root w ((MUhatLt d p q)) i < d ->
+    ult_residual w i (canonical_val root w ((MUhatLt d p q)) i) d p q ->
     ~ msat w i q ->
-    canonical_reset root w i (clock_of (MUhatLt d p q)) = false.
+    canonical_reset root w i ((MUhatLt d p q)) = false.
 Proof.
   intros.
   unfold canonical_reset, reset_policy.
@@ -828,10 +866,10 @@ Qed.
 Lemma policy_RhatGt_preserve :
   forall root w path d p q i,
     node_at root path = Some (MRhatGt d p q) ->
-    canonical_val root w (clock_of (MRhatGt d p q)) i <= d ->
-    rgt_residual w i (canonical_val root w (clock_of (MRhatGt d p q)) i) d p q ->
+    canonical_val root w ((MRhatGt d p q)) i <= d ->
+    rgt_residual w i (canonical_val root w ((MRhatGt d p q)) i) d p q ->
     ~ msat w i p ->
-    canonical_reset root w i (clock_of (MRhatGt d p q)) = false.
+    canonical_reset root w i ((MRhatGt d p q)) = false.
 Proof.
   intros.
   unfold canonical_reset, reset_policy.
@@ -841,6 +879,9 @@ Proof.
   auto.
 Qed.
 
+
+Section Soundness.
+Variable root : mtl.
 
 (* ====================================================================== *)
 (* 7. The two dominance lemmas                                            *)
@@ -858,7 +899,7 @@ Qed.
    prefix required by the old activation.
 *)
 Lemma sound_UhatLe :
-  forall rho path d p q i,
+  forall (rho : ext_word root) path d p q i,
     clock_consistent rho ->
     (forall n,
        lsat rho n (T_at (left_path path) p) ->
@@ -871,17 +912,20 @@ Lemma sound_UhatLe :
 Proof.
   intros rho path d p q i Hcc IHp IHq HT.
   simpl in HT.
+  destruct (clock_of root (MUhatLe d p q)) as [x|] eqn:Hxof; [|contradiction].
+  pose proof (clock_of_proj Hxof) as Hxproj.
+  simpl in HT.
   destruct HT as [j [Hsj [[HCj HBj] Hall]]].
   exists j. repeat split.
   - lia.
   - assert (Hpres :
-      forall k : nat, (S i <= k < j)%nat -> unch_at rho (clock_of (MUhatLe d p q)) k).
+      forall k : nat, (S i <= k < j)%nat -> unch_at rho (x) k).
     { intros k Hk.
       specialize (Hall k Hk).
       exact (proj1 (proj2 Hall)). }
     pose proof
       (preserve_from_next_elapsed_le_value
-         (rho:=rho) (i:=i) (j:=j) (x:=clock_of (MUhatLe d p q)) Hcc Hsj Hpres) as Hel.
+         (rho:=rho) (i:=i) (j:=j) (x:=x) Hcc Hsj Hpres) as Hel.
     unfold c_le in HCj.
     eapply Rle_trans; [exact Hel | exact HCj].
   - apply IHq. exact HBj.
@@ -893,7 +937,7 @@ Proof.
 Qed.
 
 Lemma sound_UhatGe :
-  forall rho path d p q i,
+  forall (rho : ext_word root) path d p q i,
     0 < d ->
     clock_consistent rho ->
     (forall n,
@@ -906,6 +950,9 @@ Lemma sound_UhatGe :
     msat (ew_base rho) i (MUhatGe d p q).
 Proof.
   intros rho path d p q i Hd Hcc IHp IHq HT.
+  simpl in HT.
+  destruct (clock_of root (MUhatGe d p q)) as [x|] eqn:Hxof; [|contradiction].
+  pose proof (clock_of_proj Hxof) as Hxproj.
   simpl in HT.
   destruct HT as [Hrst Hnext].
   destruct Hnext as [HUQ | [HGA HGFB]].
@@ -952,7 +999,7 @@ Proof.
 Qed.
 
 Lemma sound_RhatLe :
-  forall rho path d p q i,
+  forall (rho : ext_word root) path d p q i,
     clock_consistent rho ->
     (forall n,
        lsat rho n (T_at (left_path path) p) ->
@@ -965,16 +1012,19 @@ Lemma sound_RhatLe :
 Proof.
   intros rho path d p q i Hcc IHp IHq HT.
   simpl in HT.
+  destruct (clock_of root (MRhatLe d p q)) as [x|] eqn:Hxof; [|contradiction].
+  pose proof (clock_of_proj Hxof) as Hxproj.
+  simpl in HT.
   destruct HT as [Hrst HW].
   change (lsat rho (S i)
     (LW
       (T_at (right_path path) q)
-      (LOr (LAtom (LCGt (clock_of (MRhatLe d p q)) d))
+      (LOr (LAtom (LCGt (x) d))
            (LAnd (T_at (left_path path) p)
                  (T_at (right_path path) q))))) in HW.
-  apply (proj1 (@LW_semantics rho (S i)
+  apply (proj1 (@LW_semantics _ rho (S i)
     (T_at (right_path path) q)
-    (LOr (LAtom (LCGt (clock_of (MRhatLe d p q)) d))
+    (LOr (LAtom (LCGt (x) d))
          (LAnd (T_at (left_path path) p)
                (T_at (right_path path) q))))) in HW.
   intros j Hij Hbound.
@@ -987,7 +1037,7 @@ Proof.
         unfold c_gt in Hgt.
         pose proof
           (after_reset_value_le_elapsed
-             (rho:=rho) (i:=i) (j:=m) (x:=clock_of (MRhatLe d p q))
+             (rho:=rho) (i:=i) (j:=m) (x:=x)
              Hcc Hrst HSm) as Hval_m.
         pose proof (time_monotone (ew_base rho) Hmj) as Htime_mj.
         assert (Hel_mj :
@@ -995,7 +1045,7 @@ Proof.
         { unfold elapsed, Rminus.
           apply Rplus_le_compat_r.
           exact Htime_mj. }
-        assert (Hval_le_d : ew_val rho m (clock_of (MRhatLe d p q)) <= d).
+        assert (Hval_le_d : ew_val rho m (x) <= d).
         { eapply Rle_trans; [exact Hval_m |].
           eapply Rle_trans; [exact Hel_mj | exact Hbound]. }
         exact (Rlt_not_le _ _ Hgt Hval_le_d).
@@ -1008,7 +1058,7 @@ Proof.
 Qed.
 
 Lemma sound_RhatGe :
-  forall rho path d p q i,
+  forall (rho : ext_word root) path d p q i,
     0 < d ->
     clock_consistent rho ->
     (forall n,
@@ -1022,20 +1072,23 @@ Lemma sound_RhatGe :
 Proof.
   intros rho path d p q i Hd Hcc IHp IHq HT.
   simpl in HT.
+  destruct (clock_of root (MRhatGe d p q)) as [x|] eqn:Hxof; [|contradiction].
+  pose proof (clock_of_proj Hxof) as Hxproj.
+  simpl in HT.
   change (lsat rho (S i)
     (LW
-      (LAnd (LAtom (LCLt (clock_of (MRhatGe d p q)) d)) (LAtom (LUnch (clock_of (MRhatGe d p q)))))
+      (LAnd (LAtom (LCLt (x) d)) (LAtom (LUnch (x))))
       (LOr
         (LRelease (T_at (left_path path) p)
                   (T_at (right_path path) q))
-        (LAnd (LAtom (LCLt (clock_of (MRhatGe d p q)) d))
+        (LAnd (LAtom (LCLt (x) d))
               (T_at (left_path path) p))))) in HT.
-  apply (proj1 (@LW_semantics rho (S i)
-    (LAnd (LAtom (LCLt (clock_of (MRhatGe d p q)) d)) (LAtom (LUnch (clock_of (MRhatGe d p q)))))
+  apply (proj1 (@LW_semantics _ rho (S i)
+    (LAnd (LAtom (LCLt (x) d)) (LAtom (LUnch (x))))
     (LOr
       (LRelease (T_at (left_path path) p)
                 (T_at (right_path path) q))
-      (LAnd (LAtom (LCLt (clock_of (MRhatGe d p q)) d))
+      (LAnd (LAtom (LCLt (x) d))
             (T_at (left_path path) p))))) in HT.
   intros j Hij Hbound.
   assert (HSj : (S i <= j)%nat) by lia.
@@ -1051,15 +1104,15 @@ Proof.
       * destruct (Nat.eq_dec m j) as [-> | Hneq].
         -- exfalso.
            assert (Hpres :
-             forall k : nat, (S i <= k < j)%nat -> unch_at rho (clock_of (MRhatGe d p q)) k).
+             forall k : nat, (S i <= k < j)%nat -> unch_at rho (x) k).
            { intros k Hk.
              specialize (Hpre k Hk).
              exact (proj2 Hpre). }
            pose proof
              (preserve_from_next_elapsed_le_value
-                (rho:=rho) (i:=i) (j:=j) (x:=clock_of (MRhatGe d p q))
+                (rho:=rho) (i:=i) (j:=j) (x:=x)
                 Hcc HSj Hpres) as Hel.
-           assert (Hdval : d <= ew_val rho j (clock_of (MRhatGe d p q))).
+           assert (Hdval : d <= ew_val rho j (x)).
            { eapply Rle_trans; [exact Hbound | exact Hel]. }
            exact (Rlt_not_le _ _ Hlt Hdval).
         -- right. exists m. split; [lia|].
@@ -1069,33 +1122,33 @@ Proof.
       destruct Hprej as [Hltj _].
       exfalso.
       assert (Hpres :
-        forall k : nat, (S i <= k < j)%nat -> unch_at rho (clock_of (MRhatGe d p q)) k).
+        forall k : nat, (S i <= k < j)%nat -> unch_at rho (x) k).
       { intros k Hk.
         assert (Hkm : (S i <= k < m)%nat) by lia.
         specialize (Hpre k Hkm).
         exact (proj2 Hpre). }
       pose proof
         (preserve_from_next_elapsed_le_value
-           (rho:=rho) (i:=i) (j:=j) (x:=clock_of (MRhatGe d p q))
+           (rho:=rho) (i:=i) (j:=j) (x:=x)
            Hcc HSj Hpres) as Hel.
       unfold c_lt in Hltj.
-      assert (Hdval : d <= ew_val rho j (clock_of (MRhatGe d p q))).
+      assert (Hdval : d <= ew_val rho j (x)).
       { eapply Rle_trans; [exact Hbound | exact Hel]. }
       exact (Rlt_not_le _ _ Hltj Hdval).
   - pose proof (HG j HSj) as HGj.
     destruct HGj as [Hltj Hun].
     exfalso.
     assert (Hpres :
-      forall k : nat, (S i <= k < j)%nat -> unch_at rho (clock_of (MRhatGe d p q)) k).
+      forall k : nat, (S i <= k < j)%nat -> unch_at rho (x) k).
     { intros k Hk.
       specialize (HG k (proj1 Hk)).
       exact (proj2 HG). }
     pose proof
       (preserve_from_next_elapsed_le_value
-         (rho:=rho) (i:=i) (j:=j) (x:=clock_of (MRhatGe d p q))
+         (rho:=rho) (i:=i) (j:=j) (x:=x)
          Hcc HSj Hpres) as Hel.
     unfold c_lt in Hltj.
-    assert (Hdval : d <= ew_val rho j (clock_of (MRhatGe d p q))).
+    assert (Hdval : d <= ew_val rho j (x)).
     { eapply Rle_trans; [exact Hbound | exact Hel]. }
     exact (Rlt_not_le _ _ Hltj Hdval).
 Qed.
@@ -1105,7 +1158,7 @@ Qed.
 (* ====================================================================== *)
 
 Lemma sound_UhatLt :
-  forall rho path d p q i,
+  forall (rho : ext_word root) path d p q i,
     clock_consistent rho ->
     (forall n,
        lsat rho n (T_at (left_path path) p) ->
@@ -1118,17 +1171,20 @@ Lemma sound_UhatLt :
 Proof.
   intros rho path d p q i Hcc IHp IHq HT.
   simpl in HT.
+  destruct (clock_of root (MUhatLt d p q)) as [x|] eqn:Hxof; [|contradiction].
+  pose proof (clock_of_proj Hxof) as Hxproj.
+  simpl in HT.
   destruct HT as [j [Hsj [[HCj HBj] Hall]]].
   exists j. repeat split.
   - lia.
   - assert (Hpres :
-      forall k : nat, (S i <= k < j)%nat -> unch_at rho (clock_of (MUhatLt d p q)) k).
+      forall k : nat, (S i <= k < j)%nat -> unch_at rho (x) k).
     { intros k Hk.
       specialize (Hall k Hk).
       exact (proj1 (proj2 Hall)). }
     pose proof
       (preserve_from_next_elapsed_le_value
-         (rho:=rho) (i:=i) (j:=j) (x:=clock_of (MUhatLt d p q)) Hcc Hsj Hpres) as Hel.
+         (rho:=rho) (i:=i) (j:=j) (x:=x) Hcc Hsj Hpres) as Hel.
     unfold c_lt in HCj.
     unfold elapsed in Hel.
     lra.
@@ -1141,7 +1197,7 @@ Proof.
 Qed.
 
 Lemma sound_UhatGt :
-  forall rho path d p q i,
+  forall (rho : ext_word root) path d p q i,
     0 < d ->
     clock_consistent rho ->
     (forall n,
@@ -1154,6 +1210,9 @@ Lemma sound_UhatGt :
     msat (ew_base rho) i (MUhatGt d p q).
 Proof.
   intros rho path d p q i Hd Hcc IHp IHq HT.
+  simpl in HT.
+  destruct (clock_of root (MUhatGt d p q)) as [x|] eqn:Hxof; [|contradiction].
+  pose proof (clock_of_proj Hxof) as Hxproj.
   simpl in HT.
   destruct HT as [Hrst Hnext].
   destruct Hnext as [HUQ | [HGA HGFB]].
@@ -1198,7 +1257,7 @@ Proof.
 Qed.
 
 Lemma sound_RhatLt :
-  forall rho path d p q i,
+  forall (rho : ext_word root) path d p q i,
     clock_consistent rho ->
     (forall n,
        lsat rho n (T_at (left_path path) p) ->
@@ -1211,16 +1270,19 @@ Lemma sound_RhatLt :
 Proof.
   intros rho path d p q i Hcc IHp IHq HT.
   simpl in HT.
+  destruct (clock_of root (MRhatLt d p q)) as [x|] eqn:Hxof; [|contradiction].
+  pose proof (clock_of_proj Hxof) as Hxproj.
+  simpl in HT.
   destruct HT as [Hrst HW].
   change (lsat rho (S i)
     (LW
       (T_at (right_path path) q)
-      (LOr (LAtom (LCGe (clock_of (MRhatLt d p q)) d))
+      (LOr (LAtom (LCGe (x) d))
            (LAnd (T_at (left_path path) p)
                  (T_at (right_path path) q))))) in HW.
-  apply (proj1 (@LW_semantics rho (S i)
+  apply (proj1 (@LW_semantics _ rho (S i)
     (T_at (right_path path) q)
-    (LOr (LAtom (LCGe (clock_of (MRhatLt d p q)) d))
+    (LOr (LAtom (LCGe (x) d))
          (LAnd (T_at (left_path path) p)
                (T_at (right_path path) q))))) in HW.
   intros j Hij Hbound.
@@ -1233,7 +1295,7 @@ Proof.
         unfold c_ge in Hge.
         pose proof
           (after_reset_value_le_elapsed
-             (rho:=rho) (i:=i) (j:=m) (x:=clock_of (MRhatLt d p q))
+             (rho:=rho) (i:=i) (j:=m) (x:=x)
              Hcc Hrst HSm) as Hval_m.
         pose proof (time_monotone (ew_base rho) Hmj) as Htime_mj.
         assert (Hel_mj :
@@ -1241,7 +1303,7 @@ Proof.
         { unfold elapsed, Rminus.
           apply Rplus_le_compat_r.
           exact Htime_mj. }
-        assert (Hval_lt_d : ew_val rho m (clock_of (MRhatLt d p q)) < d).
+        assert (Hval_lt_d : ew_val rho m (x) < d).
         { unfold elapsed in Hval_m; lra. }
         exact (Rle_not_lt _ _ Hge Hval_lt_d).
       * destruct (Nat.eq_dec m j) as [-> | Hneq].
@@ -1253,7 +1315,7 @@ Proof.
 Qed.
 
 Lemma sound_RhatGt :
-  forall rho path d p q i,
+  forall (rho : ext_word root) path d p q i,
     0 < d ->
     clock_consistent rho ->
     (forall n,
@@ -1267,20 +1329,23 @@ Lemma sound_RhatGt :
 Proof.
   intros rho path d p q i Hd Hcc IHp IHq HT.
   simpl in HT.
+  destruct (clock_of root (MRhatGt d p q)) as [x|] eqn:Hxof; [|contradiction].
+  pose proof (clock_of_proj Hxof) as Hxproj.
+  simpl in HT.
   change (lsat rho (S i)
     (LW
-      (LAnd (LAtom (LCLe (clock_of (MRhatGt d p q)) d)) (LAtom (LUnch (clock_of (MRhatGt d p q)))))
+      (LAnd (LAtom (LCLe (x) d)) (LAtom (LUnch (x))))
       (LOr
         (LRelease (T_at (left_path path) p)
                   (T_at (right_path path) q))
-        (LAnd (LAtom (LCLe (clock_of (MRhatGt d p q)) d))
+        (LAnd (LAtom (LCLe (x) d))
               (T_at (left_path path) p))))) in HT.
-  apply (proj1 (@LW_semantics rho (S i)
-    (LAnd (LAtom (LCLe (clock_of (MRhatGt d p q)) d)) (LAtom (LUnch (clock_of (MRhatGt d p q)))))
+  apply (proj1 (@LW_semantics _ rho (S i)
+    (LAnd (LAtom (LCLe (x) d)) (LAtom (LUnch (x))))
     (LOr
       (LRelease (T_at (left_path path) p)
                 (T_at (right_path path) q))
-      (LAnd (LAtom (LCLe (clock_of (MRhatGt d p q)) d))
+      (LAnd (LAtom (LCLe (x) d))
             (T_at (left_path path) p))))) in HT.
   intros j Hij Hbound.
   assert (HSj : (S i <= j)%nat) by lia.
@@ -1296,13 +1361,13 @@ Proof.
       * destruct (Nat.eq_dec m j) as [-> | Hneq].
         -- exfalso.
            assert (Hpres :
-             forall k : nat, (S i <= k < j)%nat -> unch_at rho (clock_of (MRhatGt d p q)) k).
+             forall k : nat, (S i <= k < j)%nat -> unch_at rho (x) k).
            { intros k Hk.
              specialize (Hpre k Hk).
              exact (proj2 Hpre). }
            pose proof
              (preserve_from_next_elapsed_le_value
-                (rho:=rho) (i:=i) (j:=j) (x:=clock_of (MRhatGt d p q))
+                (rho:=rho) (i:=i) (j:=j) (x:=x)
                 Hcc HSj Hpres) as Hel.
            apply (Rle_not_lt _ _ Hle).
            apply Rlt_le_trans with (elapsed (ew_base rho) i j); auto.
@@ -1313,17 +1378,17 @@ Proof.
       destruct Hprej as [Hlej _].
       exfalso.
       assert (Hpres :
-        forall k : nat, (S i <= k < j)%nat -> unch_at rho (clock_of (MRhatGt d p q)) k).
+        forall k : nat, (S i <= k < j)%nat -> unch_at rho (x) k).
       { intros k Hk.
         assert (Hkm : (S i <= k < m)%nat) by lia.
         specialize (Hpre k Hkm).
         exact (proj2 Hpre). }
       pose proof
         (preserve_from_next_elapsed_le_value
-           (rho:=rho) (i:=i) (j:=j) (x:=clock_of (MRhatGt d p q))
+           (rho:=rho) (i:=i) (j:=j) (x:=x)
            Hcc HSj Hpres) as Hel.
       assert (Hval_le_d :
-      ew_val rho j (clock_of (MRhatGt d p q)) <= d).
+      ew_val rho j (x) <= d).
       {
         simpl in Hlej.
         unfold c_le in Hlej.
@@ -1335,13 +1400,13 @@ Proof.
     destruct HGj as [Hlej Hun].
     exfalso.
     assert (Hpres :
-      forall k : nat, (S i <= k < j)%nat -> unch_at rho (clock_of (MRhatGt d p q)) k).
+      forall k : nat, (S i <= k < j)%nat -> unch_at rho (x) k).
     { intros k Hk.
       specialize (HG k (proj1 Hk)).
       exact (proj2 HG). }
     pose proof
       (preserve_from_next_elapsed_le_value
-         (rho:=rho) (i:=i) (j:=j) (x:=clock_of (MRhatGt d p q))
+         (rho:=rho) (i:=i) (j:=j) (x:=x)
          Hcc HSj Hpres) as Hel.
     unfold c_le in Hlej.
     simpl in Hlej.
@@ -1351,6 +1416,8 @@ Proof.
 Qed.
 
 
+
+End Soundness.
 
 (* ====================================================================== *)
 (* 9. Canonical COMPLETENESS lemmas                                      *)
@@ -1401,9 +1468,9 @@ Qed.
 Lemma policy_UhatLe_preserve_inv :
   forall root w path d p q i,
     node_at root path = Some (MUhatLe d p q) ->
-    canonical_reset root w i (clock_of (MUhatLe d p q)) = false ->
-    canonical_val root w (clock_of (MUhatLe d p q)) i <= d /\
-    ule_residual w i (canonical_val root w (clock_of (MUhatLe d p q)) i) d p q /\
+    canonical_reset root w i ((MUhatLe d p q)) = false ->
+    canonical_val root w ((MUhatLe d p q)) i <= d /\
+    ule_residual w i (canonical_val root w ((MUhatLe d p q)) i) d p q /\
     ~ msat w i q.
 Proof.
   intros root w path d p q i Hnode Hreset.
@@ -1415,9 +1482,9 @@ Qed.
 Lemma policy_RhatGe_preserve_inv :
   forall root w path d p q i,
     node_at root path = Some (MRhatGe d p q) ->
-    canonical_reset root w i (clock_of (MRhatGe d p q)) = false ->
-    canonical_val root w (clock_of (MRhatGe d p q)) i < d /\
-    rge_residual w i (canonical_val root w (clock_of (MRhatGe d p q)) i) d p q /\
+    canonical_reset root w i ((MRhatGe d p q)) = false ->
+    canonical_val root w ((MRhatGe d p q)) i < d /\
+    rge_residual w i (canonical_val root w ((MRhatGe d p q)) i) d p q /\
     ~ msat w i p.
 Proof.
   intros root w path d p q i Hnode Hreset.
@@ -1490,7 +1557,7 @@ Qed.
 Definition uhatge_event
     (root : mtl) (w : timed_word) (path : Path)
     (d : R) (p q : mtl) (n : nat) : Prop :=
-  d <= canonical_val root w (clock_of (MUhatGe d p q)) n /\
+  d <= canonical_val root w ((MUhatGe d p q)) n /\
   exists m,
     (n <= m)%nat /\
     msat w m q /\
@@ -1499,22 +1566,22 @@ Definition uhatge_event
 Definition rhatle_event
     (root : mtl) (w : timed_word) (path : Path)
     (d : R) (p q : mtl) (n : nat) : Prop :=
-  d < canonical_val root w (clock_of (MRhatLe d p q)) n \/
+  d < canonical_val root w ((MRhatLe d p q)) n \/
   (msat w n p /\ msat w n q).
 
 Definition rhatge_event
     (root : mtl) (w : timed_word) (path : Path)
     (d : R) (p q : mtl) (n : nat) : Prop :=
   msat w n (MR p q) \/
-  (canonical_val root w (clock_of (MRhatGe d p q)) n < d /\ msat w n p).
+  (canonical_val root w ((MRhatGe d p q)) n < d /\ msat w n p).
 
 
 Lemma policy_UhatLt_preserve_inv :
   forall root w path d p q i,
     node_at root path = Some (MUhatLt d p q) ->
-    canonical_reset root w i (clock_of (MUhatLt d p q)) = false ->
-    canonical_val root w (clock_of (MUhatLt d p q)) i < d /\
-    ult_residual w i (canonical_val root w (clock_of (MUhatLt d p q)) i) d p q /\
+    canonical_reset root w i ((MUhatLt d p q)) = false ->
+    canonical_val root w ((MUhatLt d p q)) i < d /\
+    ult_residual w i (canonical_val root w ((MUhatLt d p q)) i) d p q /\
     ~ msat w i q.
 Proof.
   intros root w path d p q i Hnode Hreset.
@@ -1526,9 +1593,9 @@ Qed.
 Lemma policy_RhatGt_preserve_inv :
   forall root w path d p q i,
     node_at root path = Some (MRhatGt d p q) ->
-    canonical_reset root w i (clock_of (MRhatGt d p q)) = false ->
-    canonical_val root w (clock_of (MRhatGt d p q)) i <= d /\
-    rgt_residual w i (canonical_val root w (clock_of (MRhatGt d p q)) i) d p q /\
+    canonical_reset root w i ((MRhatGt d p q)) = false ->
+    canonical_val root w ((MRhatGt d p q)) i <= d /\
+    rgt_residual w i (canonical_val root w ((MRhatGt d p q)) i) d p q /\
     ~ msat w i p.
 Proof.
   intros root w path d p q i Hnode Hreset.
@@ -1561,7 +1628,7 @@ Qed.
 Definition uhatgt_event
     (root : mtl) (w : timed_word) (path : Path)
     (d : R) (p q : mtl) (n : nat) : Prop :=
-  d < canonical_val root w (clock_of (MUhatGt d p q)) n /\
+  d < canonical_val root w ((MUhatGt d p q)) n /\
   exists m,
     (n <= m)%nat /\
     msat w m q /\
@@ -1570,14 +1637,14 @@ Definition uhatgt_event
 Definition rhatlt_event
     (root : mtl) (w : timed_word) (path : Path)
     (d : R) (p q : mtl) (n : nat) : Prop :=
-  d <= canonical_val root w (clock_of (MRhatLt d p q)) n \/
+  d <= canonical_val root w ((MRhatLt d p q)) n \/
   (msat w n p /\ msat w n q).
 
 Definition rhatgt_event
     (root : mtl) (w : timed_word) (path : Path)
     (d : R) (p q : mtl) (n : nat) : Prop :=
   msat w n (MR p q) \/
-  (canonical_val root w (clock_of (MRhatGt d p q)) n <= d /\ msat w n p).
+  (canonical_val root w ((MRhatGt d p q)) n <= d /\ msat w n p).
 
 (* ---------------------------------------------------------------------- *)
 (* U <=                                                                   *)
@@ -1597,6 +1664,9 @@ Lemma complete_UhatLe :
       lsat (canonical_ext root w) i (T_at path (MUhatLe d p q)).
 Proof.
   intros root w path d p q Hnode IHp IHq i Hmtl.
+  assert (Hmem : In (MUhatLe d p q) (timed_subformulas root))
+    by (apply (node_at_timed_incl Hnode); simpl; left; reflexivity).
+  cbn [T_at]; rewrite (clock_of_mem Hmem).
   destruct Hmtl as [j [Hij [Hbound [Hq Hp]]]].
   assert (HSj : (S i <= j)%nat) by lia.
 
@@ -1622,18 +1692,18 @@ Proof.
   assert (Hinv :
     forall n : nat,
       (S i <= n <= j0)%nat ->
-      canonical_val root w (clock_of (MUhatLe d p q)) n + elapsed w n j0 <= d).
+      canonical_val root w ((MUhatLe d p q)) n + elapsed w n j0 <= d).
   {
     intros n Hrange.
     induction n using (well_founded_induction lt_wf).
     destruct (Nat.eq_dec n (S i)) as [Hbase | Hstep].
     - subst n.
       change
-        ((if canonical_reset root w i (clock_of (MUhatLe d p q))
+        ((if canonical_reset root w i ((MUhatLe d p q))
           then delta w i
-          else canonical_val root w (clock_of (MUhatLe d p q)) i + delta w i)
+          else canonical_val root w ((MUhatLe d p q)) i + delta w i)
          + elapsed w (S i) j0 <= d).
-      destruct (canonical_reset root w i (clock_of (MUhatLe d p q))) eqn:Hr.
+      destruct (canonical_reset root w i ((MUhatLe d p q))) eqn:Hr.
       + unfold elapsed, delta in *.
         lra.
       + destruct (policy_UhatLe_preserve_inv Hnode Hr)
@@ -1665,10 +1735,10 @@ Proof.
       assert (Hel_nonneg : 0 <= elapsed w (pred n) j0).
       { apply elapsed_nonnegative. exact Hpred_j0. }
       assert (Hval_le :
-        canonical_val root w (clock_of (MUhatLe d p q)) (pred n) <= d) by lra.
+        canonical_val root w ((MUhatLe d p q)) (pred n) <= d) by lra.
       assert (Hres :
         ule_residual w (pred n)
-          (canonical_val root w (clock_of (MUhatLe d p q)) (pred n)) d p q).
+          (canonical_val root w ((MUhatLe d p q)) (pred n)) d p q).
       {
         unfold ule_residual.
         exists j0.
@@ -1714,9 +1784,9 @@ Proof.
       specialize (Hinv k Hkrange).
       assert (Hel : 0 <= elapsed w k j0).
       { apply elapsed_nonnegative. lia. }
-      assert (Hval_le : canonical_val root w (clock_of (MUhatLe d p q)) k <= d) by lra.
+      assert (Hval_le : canonical_val root w ((MUhatLe d p q)) k <= d) by lra.
       assert (Hres :
-        ule_residual w k (canonical_val root w (clock_of (MUhatLe d p q)) k) d p q).
+        ule_residual w k (canonical_val root w ((MUhatLe d p q)) k) d p q).
       {
         unfold ule_residual.
         exists j0.
@@ -1752,6 +1822,9 @@ Lemma complete_UhatGe :
       lsat (canonical_ext root w) i (T_at path (MUhatGe d p q)).
 Proof.
   intros root w path d p q Hd Hnode IHp IHq i Hmtl.
+  assert (Hmem : In (MUhatGe d p q) (timed_subformulas root))
+    by (apply (node_at_timed_incl Hnode); simpl; left; reflexivity).
+  cbn [T_at]; rewrite (clock_of_mem Hmem).
   pose proof Hmtl as HFi.
   destruct Hmtl as [j [Hij [Hfar [Hq Hp]]]].
 
@@ -1775,7 +1848,7 @@ Proof.
           msat w m q /\
           (forall k : nat,
              (s < k < m)%nat -> msat w k p) /\
-          canonical_val root w (clock_of (MUhatGe d p q)) n = elapsed w s n).
+          canonical_val root w ((MUhatGe d p q)) n = elapsed w s n).
     {
       intro n.
       induction n using (well_founded_induction lt_wf).
@@ -1840,7 +1913,7 @@ Proof.
           reflexivity.
         + exists s, m.
           repeat split; try assumption; try lia.
-          assert (Hr : canonical_reset root w (pred n) (clock_of (MUhatGe d p q)) = false).
+          assert (Hr : canonical_reset root w (pred n) ((MUhatGe d p q)) = false).
           {
             unfold canonical_reset, reset_policy; simpl.
             apply (proj2 (decide_false
@@ -1916,7 +1989,7 @@ Proof.
       split.
       * change (lsat (canonical_ext root w) (S i)
           (LG (T_at (left_path path) p))).
-        apply (proj2 (@LG_semantics (canonical_ext root w) (S i)
+        apply (proj2 (@LG_semantics _ (canonical_ext root w) (S i)
           (T_at (left_path path) p))).
         intros n HSn.
         apply (proj1 (IHp n)).
@@ -1952,7 +2025,7 @@ Proof.
         lia.
       * change (lsat (canonical_ext root w) (S i)
           (LGF (T_at (right_path path) q))).
-        apply (proj2 (@LGF_semantics (canonical_ext root w) (S i)
+        apply (proj2 (@LGF_semantics _ (canonical_ext root w) (S i)
           (T_at (right_path path) q))).
         intros n HSn.
         assert (Hnone_n :
@@ -1991,6 +2064,9 @@ Lemma complete_RhatLe :
       lsat (canonical_ext root w) i (T_at path (MRhatLe d p q)).
 Proof.
   intros root w path d p q Hnode IHp IHq i Hmtl.
+  assert (Hmem : In (MRhatLe d p q) (timed_subformulas root))
+    by (apply (node_at_timed_incl Hnode); simpl; left; reflexivity).
+  cbn [T_at]; rewrite (clock_of_mem Hmem).
   pose proof Hmtl as HFi.
   simpl.
   split.
@@ -1999,12 +2075,12 @@ Proof.
   - change (lsat (canonical_ext root w) (S i)
       (LW
         (T_at (right_path path) q)
-        (LOr (LAtom (LCGt (clock_of (MRhatLe d p q)) d))
+        (LOr (LAtom (LCGt (exist _ (MRhatLe d p q) Hmem) d))
              (LAnd (T_at (left_path path) p)
                    (T_at (right_path path) q))))).
-    apply (proj2 (@LW_semantics (canonical_ext root w) (S i)
+    apply (proj2 (@LW_semantics _ (canonical_ext root w) (S i)
       (T_at (right_path path) q)
-      (LOr (LAtom (LCGt (clock_of (MRhatLe d p q)) d))
+      (LOr (LAtom (LCGt (exist _ (MRhatLe d p q) Hmem) d))
            (LAnd (T_at (left_path path) p)
                  (T_at (right_path path) q))))).
 
@@ -2017,7 +2093,7 @@ Proof.
         exists s,
           (i <= s < n)%nat /\
           msat w s (MRhatLe d p q) /\
-          canonical_val root w (clock_of (MRhatLe d p q)) n = elapsed w s n /\
+          canonical_val root w ((MRhatLe d p q)) n = elapsed w s n /\
           (forall h : nat,
              (s < h < n)%nat -> ~ msat w h p)).
     {
@@ -2053,9 +2129,9 @@ Proof.
         assert (Hnoevent_k :
           ~ rhatle_event root w path d p q (pred n)).
         { apply Hnone. lia. }
-        assert (Hle : canonical_val root w (clock_of (MRhatLe d p q)) (pred n) <= d).
+        assert (Hle : canonical_val root w ((MRhatLe d p q)) (pred n) <= d).
         {
-          destruct (Rle_dec (canonical_val root w (clock_of (MRhatLe d p q)) (pred n)) d)
+          destruct (Rle_dec' (canonical_val root w ((MRhatLe d p q)) (pred n)) d)
             as [Hle | Hnle].
           - exact Hle.
           - exfalso.
@@ -2104,7 +2180,7 @@ Proof.
           ring.
         + exists s.
           repeat split; try assumption; try lia.
-          * assert (Hr : canonical_reset root w (pred n) (clock_of (MRhatLe d p q)) = false).
+          * assert (Hr : canonical_reset root w (pred n) ((MRhatLe d p q)) = false).
             {
               unfold canonical_reset, reset_policy.
               apply (proj2 (decide_false
@@ -2162,9 +2238,9 @@ Proof.
         assert (Hnoevent_k :
           ~ rhatle_event root w path d p q k).
         { apply Hfirst. lia. }
-        assert (Hle : canonical_val root w (clock_of (MRhatLe d p q)) k <= d).
+        assert (Hle : canonical_val root w ((MRhatLe d p q)) k <= d).
         {
-          destruct (Rle_dec (canonical_val root w (clock_of (MRhatLe d p q)) k) d)
+          destruct (Rle_dec' (canonical_val root w ((MRhatLe d p q)) k) d)
             as [Hle | Hnle].
           - exact Hle.
           - exfalso.
@@ -2210,9 +2286,9 @@ Proof.
         exists k.
         split; assumption.
       }
-      assert (Hle : canonical_val root w (clock_of (MRhatLe d p q)) k <= d).
+      assert (Hle : canonical_val root w ((MRhatLe d p q)) k <= d).
       {
-        destruct (Rle_dec (canonical_val root w (clock_of (MRhatLe d p q)) k) d)
+        destruct (Rle_dec' (canonical_val root w ((MRhatLe d p q)) k) d)
           as [Hle | Hnle].
         - exact Hle.
         - exfalso.
@@ -2276,21 +2352,24 @@ Lemma complete_RhatGe :
       lsat (canonical_ext root w) i (T_at path (MRhatGe d p q)).
 Proof.
   intros root w path d p q Hd Hnode IHp IHq i Hmtl.
+  assert (Hmem : In (MRhatGe d p q) (timed_subformulas root))
+    by (apply (node_at_timed_incl Hnode); simpl; left; reflexivity).
+  cbn [T_at]; rewrite (clock_of_mem Hmem).
   simpl.
   change (lsat (canonical_ext root w) (S i)
     (LW
-      (LAnd (LAtom (LCLt (clock_of (MRhatGe d p q)) d)) (LAtom (LUnch (clock_of (MRhatGe d p q)))))
+      (LAnd (LAtom (LCLt (exist _ (MRhatGe d p q) Hmem) d)) (LAtom (LUnch (exist _ (MRhatGe d p q) Hmem))))
       (LOr
         (LRelease (T_at (left_path path) p)
                   (T_at (right_path path) q))
-        (LAnd (LAtom (LCLt (clock_of (MRhatGe d p q)) d))
+        (LAnd (LAtom (LCLt (exist _ (MRhatGe d p q) Hmem) d))
               (T_at (left_path path) p))))).
-  apply (proj2 (@LW_semantics (canonical_ext root w) (S i)
-    (LAnd (LAtom (LCLt (clock_of (MRhatGe d p q)) d)) (LAtom (LUnch (clock_of (MRhatGe d p q)))))
+  apply (proj2 (@LW_semantics _ (canonical_ext root w) (S i)
+    (LAnd (LAtom (LCLt (exist _ (MRhatGe d p q) Hmem) d)) (LAtom (LUnch (exist _ (MRhatGe d p q) Hmem))))
     (LOr
       (LRelease (T_at (left_path path) p)
                 (T_at (right_path path) q))
-      (LAnd (LAtom (LCLt (clock_of (MRhatGe d p q)) d))
+      (LAnd (LAtom (LCLt (exist _ (MRhatGe d p q) Hmem) d))
             (T_at (left_path path) p))))).
 
   assert (Hactive :
@@ -2299,14 +2378,14 @@ Proof.
       (forall r : nat,
          (S i <= r < n)%nat ->
          ~ rhatge_event root w path d p q r) ->
-      rge_residual w n (canonical_val root w (clock_of (MRhatGe d p q)) n) d p q).
+      rge_residual w n (canonical_val root w ((MRhatGe d p q)) n) d p q).
   {
     intro n.
     induction n using (well_founded_induction lt_wf).
     intros HSn Hnone.
     destruct (Nat.eq_dec n (S i)) as [Hbase | Hstep].
     - subst n.
-      destruct (canonical_reset root w i (clock_of (MRhatGe d p q))) eqn:Hr.
+      destruct (canonical_reset root w i ((MRhatGe d p q))) eqn:Hr.
       + pose proof (MRhatGe_after_step_residual Hd Hmtl) as Hshift.
         unfold canonical_reset in Hr.
         simpl.
@@ -2338,9 +2417,9 @@ Proof.
       assert (Hnoevent_k :
         ~ rhatge_event root w path d p q (pred n)).
       { apply Hnone. lia. }
-      assert (Hlt : canonical_val root w (clock_of (MRhatGe d p q)) (pred n) < d).
+      assert (Hlt : canonical_val root w ((MRhatGe d p q)) (pred n) < d).
       {
-        destruct (Rlt_dec (canonical_val root w (clock_of (MRhatGe d p q)) (pred n)) d)
+        destruct (Rlt_dec' (canonical_val root w ((MRhatGe d p q)) (pred n)) d)
           as [Hlt | Hnlt].
         - exact Hlt.
         - exfalso.
@@ -2352,7 +2431,7 @@ Proof.
           assert (Hel : 0 <= elapsed w (pred n) j).
           { apply elapsed_nonnegative. exact Hkj. }
           assert (Hthreshold :
-            d <= canonical_val root w (clock_of (MRhatGe d p q)) (pred n) +
+            d <= canonical_val root w ((MRhatGe d p q)) (pred n) +
                  elapsed w (pred n) j) by lra.
           exact (Hres j Hkj Hthreshold).
       }
@@ -2418,7 +2497,7 @@ Proof.
           ~ rhatge_event root w path d p q k).
         { apply Hfirst. lia. }
         unfold c_lt; simpl.
-        destruct (Rlt_dec (canonical_val root w (clock_of (MRhatGe d p q)) k) d)
+        destruct (Rlt_dec' (canonical_val root w ((MRhatGe d p q)) k) d)
           as [Hlt | Hnlt].
         -- exact Hlt.
         -- exfalso.
@@ -2430,7 +2509,7 @@ Proof.
            assert (Hel : 0 <= elapsed w k j).
            { apply elapsed_nonnegative. exact Hkj. }
            assert (Hthreshold :
-             d <= canonical_val root w (clock_of (MRhatGe d p q)) k + elapsed w k j)
+             d <= canonical_val root w ((MRhatGe d p q)) k + elapsed w k j)
              by lra.
            exact (Hres j Hkj Hthreshold).
       * unfold unch_at, canonical_ext; simpl.
@@ -2447,9 +2526,9 @@ Proof.
         assert (Hnoevent_k :
           ~ rhatge_event root w path d p q k).
         { apply Hfirst. lia. }
-        assert (Hlt : canonical_val root w (clock_of (MRhatGe d p q)) k < d).
+        assert (Hlt : canonical_val root w ((MRhatGe d p q)) k < d).
         {
-          destruct (Rlt_dec (canonical_val root w (clock_of (MRhatGe d p q)) k) d)
+          destruct (Rlt_dec' (canonical_val root w ((MRhatGe d p q)) k) d)
             as [Hlt | Hnlt].
           - exact Hlt.
           - exfalso.
@@ -2461,7 +2540,7 @@ Proof.
             assert (Hel : 0 <= elapsed w k j).
             { apply elapsed_nonnegative. exact Hkj. }
             assert (Hthreshold :
-              d <= canonical_val root w (clock_of (MRhatGe d p q)) k + elapsed w k j)
+              d <= canonical_val root w ((MRhatGe d p q)) k + elapsed w k j)
               by lra.
             exact (Hres j Hkj Hthreshold).
         }
@@ -2494,7 +2573,7 @@ Proof.
         exists k. split; assumption.
       }
       unfold c_lt; simpl.
-      destruct (Rlt_dec (canonical_val root w (clock_of (MRhatGe d p q)) k) d)
+      destruct (Rlt_dec' (canonical_val root w ((MRhatGe d p q)) k) d)
         as [Hlt | Hnlt].
       * exact Hlt.
       * exfalso.
@@ -2506,7 +2585,7 @@ Proof.
         assert (Hel : 0 <= elapsed w k j).
         { apply elapsed_nonnegative. exact Hkj. }
         assert (Hthreshold :
-          d <= canonical_val root w (clock_of (MRhatGe d p q)) k + elapsed w k j)
+          d <= canonical_val root w ((MRhatGe d p q)) k + elapsed w k j)
           by lra.
         exact (Hres j Hkj Hthreshold).
     + unfold unch_at, canonical_ext; simpl.
@@ -2526,9 +2605,9 @@ Proof.
         apply Hnever.
         exists k. split; assumption.
       }
-      assert (Hlt : canonical_val root w (clock_of (MRhatGe d p q)) k < d).
+      assert (Hlt : canonical_val root w ((MRhatGe d p q)) k < d).
       {
-        destruct (Rlt_dec (canonical_val root w (clock_of (MRhatGe d p q)) k) d)
+        destruct (Rlt_dec' (canonical_val root w ((MRhatGe d p q)) k) d)
           as [Hlt | Hnlt].
         - exact Hlt.
         - exfalso.
@@ -2540,7 +2619,7 @@ Proof.
           assert (Hel : 0 <= elapsed w k j).
           { apply elapsed_nonnegative. exact Hkj. }
           assert (Hthreshold :
-            d <= canonical_val root w (clock_of (MRhatGe d p q)) k + elapsed w k j)
+            d <= canonical_val root w ((MRhatGe d p q)) k + elapsed w k j)
             by lra.
           exact (Hres j Hkj Hthreshold).
       }
@@ -2572,6 +2651,9 @@ Lemma complete_UhatLt :
       lsat (canonical_ext root w) i (T_at path (MUhatLt d p q)).
 Proof.
   intros root w path d p q Hnode IHp IHq i Hmtl.
+  assert (Hmem : In (MUhatLt d p q) (timed_subformulas root))
+    by (apply (node_at_timed_incl Hnode); simpl; left; reflexivity).
+  cbn [T_at]; rewrite (clock_of_mem Hmem).
   destruct Hmtl as [j [Hij [Hbound [Hq Hp]]]].
   assert (HSj : (S i <= j)%nat) by lia.
 
@@ -2597,18 +2679,18 @@ Proof.
   assert (Hinv :
     forall n : nat,
       (S i <= n <= j0)%nat ->
-      canonical_val root w (clock_of (MUhatLt d p q)) n + elapsed w n j0 < d).
+      canonical_val root w ((MUhatLt d p q)) n + elapsed w n j0 < d).
   {
     intros n Hrange.
     induction n using (well_founded_induction lt_wf).
     destruct (Nat.eq_dec n (S i)) as [Hbase | Hstep].
     - subst n.
       change
-        ((if canonical_reset root w i (clock_of (MUhatLt d p q))
+        ((if canonical_reset root w i ((MUhatLt d p q))
           then delta w i
-          else canonical_val root w (clock_of (MUhatLt d p q)) i + delta w i)
+          else canonical_val root w ((MUhatLt d p q)) i + delta w i)
          + elapsed w (S i) j0 < d).
-      destruct (canonical_reset root w i (clock_of (MUhatLt d p q))) eqn:Hr.
+      destruct (canonical_reset root w i ((MUhatLt d p q))) eqn:Hr.
       + unfold elapsed, delta in *.
         lra.
       + destruct (policy_UhatLt_preserve_inv Hnode Hr)
@@ -2640,10 +2722,10 @@ Proof.
       assert (Hel_nonneg : 0 <= elapsed w (pred n) j0).
       { apply elapsed_nonnegative. exact Hpred_j0. }
       assert (Hval_le :
-        canonical_val root w (clock_of (MUhatLt d p q)) (pred n) < d) by lra.
+        canonical_val root w ((MUhatLt d p q)) (pred n) < d) by lra.
       assert (Hres :
         ult_residual w (pred n)
-          (canonical_val root w (clock_of (MUhatLt d p q)) (pred n)) d p q).
+          (canonical_val root w ((MUhatLt d p q)) (pred n)) d p q).
       {
         unfold ult_residual.
         exists j0.
@@ -2689,9 +2771,9 @@ Proof.
       specialize (Hinv k Hkrange).
       assert (Hel : 0 <= elapsed w k j0).
       { apply elapsed_nonnegative. lia. }
-      assert (Hval_le : canonical_val root w (clock_of (MUhatLt d p q)) k < d) by lra.
+      assert (Hval_le : canonical_val root w ((MUhatLt d p q)) k < d) by lra.
       assert (Hres :
-        ult_residual w k (canonical_val root w (clock_of (MUhatLt d p q)) k) d p q).
+        ult_residual w k (canonical_val root w ((MUhatLt d p q)) k) d p q).
       {
         unfold ult_residual.
         exists j0.
@@ -2723,6 +2805,9 @@ Lemma complete_UhatGt :
       lsat (canonical_ext root w) i (T_at path (MUhatGt d p q)).
 Proof.
   intros root w path d p q Hd Hnode IHp IHq i Hmtl.
+  assert (Hmem : In (MUhatGt d p q) (timed_subformulas root))
+    by (apply (node_at_timed_incl Hnode); simpl; left; reflexivity).
+  cbn [T_at]; rewrite (clock_of_mem Hmem).
   pose proof Hmtl as HFi.
   destruct Hmtl as [j [Hij [Hfar [Hq Hp]]]].
 
@@ -2746,7 +2831,7 @@ Proof.
           msat w m q /\
           (forall k : nat,
              (s < k < m)%nat -> msat w k p) /\
-          canonical_val root w (clock_of (MUhatGt d p q)) n = elapsed w s n).
+          canonical_val root w ((MUhatGt d p q)) n = elapsed w s n).
     {
       intro n.
       induction n using (well_founded_induction lt_wf).
@@ -2811,7 +2896,7 @@ Proof.
           reflexivity.
         + exists s, m.
           repeat split; try assumption; try lia.
-          assert (Hr : canonical_reset root w (pred n) (clock_of (MUhatGt d p q)) = false).
+          assert (Hr : canonical_reset root w (pred n) ((MUhatGt d p q)) = false).
           {
             unfold canonical_reset, reset_policy; simpl.
             apply (proj2 (decide_false
@@ -2887,7 +2972,7 @@ Proof.
       split.
       * change (lsat (canonical_ext root w) (S i)
           (LG (T_at (left_path path) p))).
-        apply (proj2 (@LG_semantics (canonical_ext root w) (S i)
+        apply (proj2 (@LG_semantics _ (canonical_ext root w) (S i)
           (T_at (left_path path) p))).
         intros n HSn.
         apply (proj1 (IHp n)).
@@ -2923,7 +3008,7 @@ Proof.
         lia.
       * change (lsat (canonical_ext root w) (S i)
           (LGF (T_at (right_path path) q))).
-        apply (proj2 (@LGF_semantics (canonical_ext root w) (S i)
+        apply (proj2 (@LGF_semantics _ (canonical_ext root w) (S i)
           (T_at (right_path path) q))).
         intros n HSn.
         assert (Hnone_n :
@@ -2958,6 +3043,9 @@ Lemma complete_RhatLt :
       lsat (canonical_ext root w) i (T_at path (MRhatLt d p q)).
 Proof.
   intros root w path d p q Hnode IHp IHq i Hmtl.
+  assert (Hmem : In (MRhatLt d p q) (timed_subformulas root))
+    by (apply (node_at_timed_incl Hnode); simpl; left; reflexivity).
+  cbn [T_at]; rewrite (clock_of_mem Hmem).
   pose proof Hmtl as HFi.
   simpl.
   split.
@@ -2966,12 +3054,12 @@ Proof.
   - change (lsat (canonical_ext root w) (S i)
       (LW
         (T_at (right_path path) q)
-        (LOr (LAtom (LCGe (clock_of (MRhatLt d p q)) d))
+        (LOr (LAtom (LCGe (exist _ (MRhatLt d p q) Hmem) d))
              (LAnd (T_at (left_path path) p)
                    (T_at (right_path path) q))))).
-    apply (proj2 (@LW_semantics (canonical_ext root w) (S i)
+    apply (proj2 (@LW_semantics _ (canonical_ext root w) (S i)
       (T_at (right_path path) q)
-      (LOr (LAtom (LCGe (clock_of (MRhatLt d p q)) d))
+      (LOr (LAtom (LCGe (exist _ (MRhatLt d p q) Hmem) d))
            (LAnd (T_at (left_path path) p)
                  (T_at (right_path path) q))))).
 
@@ -2984,7 +3072,7 @@ Proof.
         exists s,
           (i <= s < n)%nat /\
           msat w s (MRhatLt d p q) /\
-          canonical_val root w (clock_of (MRhatLt d p q)) n = elapsed w s n /\
+          canonical_val root w ((MRhatLt d p q)) n = elapsed w s n /\
           (forall h : nat,
              (s < h < n)%nat -> ~ msat w h p)).
     {
@@ -3020,9 +3108,9 @@ Proof.
         assert (Hnoevent_k :
           ~ rhatlt_event root w path d p q (pred n)).
         { apply Hnone. lia. }
-        assert (Hlt : canonical_val root w (clock_of (MRhatLt d p q)) (pred n) < d).
+        assert (Hlt : canonical_val root w ((MRhatLt d p q)) (pred n) < d).
         {
-          destruct (Rlt_dec (canonical_val root w (clock_of (MRhatLt d p q)) (pred n)) d)
+          destruct (Rlt_dec' (canonical_val root w ((MRhatLt d p q)) (pred n)) d)
             as [Hlt | Hnlt].
           - exact Hlt.
           - exfalso.
@@ -3071,7 +3159,7 @@ Proof.
           ring.
         + exists s.
           repeat split; try assumption; try lia.
-          * assert (Hr : canonical_reset root w (pred n) (clock_of (MRhatLt d p q)) = false).
+          * assert (Hr : canonical_reset root w (pred n) ((MRhatLt d p q)) = false).
             {
               unfold canonical_reset, reset_policy.
               apply (proj2 (decide_false
@@ -3129,9 +3217,9 @@ Proof.
         assert (Hnoevent_k :
           ~ rhatlt_event root w path d p q k).
         { apply Hfirst. lia. }
-        assert (Hlt : canonical_val root w (clock_of (MRhatLt d p q)) k < d).
+        assert (Hlt : canonical_val root w ((MRhatLt d p q)) k < d).
         {
-          destruct (Rlt_dec (canonical_val root w (clock_of (MRhatLt d p q)) k) d)
+          destruct (Rlt_dec' (canonical_val root w ((MRhatLt d p q)) k) d)
             as [Hlt | Hnlt].
           - exact Hlt.
           - exfalso.
@@ -3177,9 +3265,9 @@ Proof.
         exists k.
         split; assumption.
       }
-      assert (Hlt : canonical_val root w (clock_of (MRhatLt d p q)) k < d).
+      assert (Hlt : canonical_val root w ((MRhatLt d p q)) k < d).
       {
-        destruct (Rlt_dec (canonical_val root w (clock_of (MRhatLt d p q)) k) d)
+        destruct (Rlt_dec' (canonical_val root w ((MRhatLt d p q)) k) d)
           as [Hlt | Hnlt].
         - exact Hlt.
         - exfalso.
@@ -3239,21 +3327,24 @@ Lemma complete_RhatGt :
       lsat (canonical_ext root w) i (T_at path (MRhatGt d p q)).
 Proof.
   intros root w path d p q Hd Hnode IHp IHq i Hmtl.
+  assert (Hmem : In (MRhatGt d p q) (timed_subformulas root))
+    by (apply (node_at_timed_incl Hnode); simpl; left; reflexivity).
+  cbn [T_at]; rewrite (clock_of_mem Hmem).
   simpl.
   change (lsat (canonical_ext root w) (S i)
     (LW
-      (LAnd (LAtom (LCLe (clock_of (MRhatGt d p q)) d)) (LAtom (LUnch (clock_of (MRhatGt d p q)))))
+      (LAnd (LAtom (LCLe (exist _ (MRhatGt d p q) Hmem) d)) (LAtom (LUnch (exist _ (MRhatGt d p q) Hmem))))
       (LOr
         (LRelease (T_at (left_path path) p)
                   (T_at (right_path path) q))
-        (LAnd (LAtom (LCLe (clock_of (MRhatGt d p q)) d))
+        (LAnd (LAtom (LCLe (exist _ (MRhatGt d p q) Hmem) d))
               (T_at (left_path path) p))))).
-  apply (proj2 (@LW_semantics (canonical_ext root w) (S i)
-    (LAnd (LAtom (LCLe (clock_of (MRhatGt d p q)) d)) (LAtom (LUnch (clock_of (MRhatGt d p q)))))
+  apply (proj2 (@LW_semantics _ (canonical_ext root w) (S i)
+    (LAnd (LAtom (LCLe (exist _ (MRhatGt d p q) Hmem) d)) (LAtom (LUnch (exist _ (MRhatGt d p q) Hmem))))
     (LOr
       (LRelease (T_at (left_path path) p)
                 (T_at (right_path path) q))
-      (LAnd (LAtom (LCLe (clock_of (MRhatGt d p q)) d))
+      (LAnd (LAtom (LCLe (exist _ (MRhatGt d p q) Hmem) d))
             (T_at (left_path path) p))))).
 
   assert (Hactive :
@@ -3262,14 +3353,14 @@ Proof.
       (forall r : nat,
          (S i <= r < n)%nat ->
          ~ rhatgt_event root w path d p q r) ->
-      rgt_residual w n (canonical_val root w (clock_of (MRhatGt d p q)) n) d p q).
+      rgt_residual w n (canonical_val root w ((MRhatGt d p q)) n) d p q).
   {
     intro n.
     induction n using (well_founded_induction lt_wf).
     intros HSn Hnone.
     destruct (Nat.eq_dec n (S i)) as [Hbase | Hstep].
     - subst n.
-      destruct (canonical_reset root w i (clock_of (MRhatGt d p q))) eqn:Hr.
+      destruct (canonical_reset root w i ((MRhatGt d p q))) eqn:Hr.
       + pose proof (MRhatGt_after_step_residual Hd Hmtl) as Hshift.
         unfold canonical_reset in Hr.
         simpl.
@@ -3301,9 +3392,9 @@ Proof.
       assert (Hnoevent_k :
         ~ rhatgt_event root w path d p q (pred n)).
       { apply Hnone. lia. }
-      assert (Hlt : canonical_val root w (clock_of (MRhatGt d p q)) (pred n) <= d).
+      assert (Hlt : canonical_val root w ((MRhatGt d p q)) (pred n) <= d).
       {
-        destruct (Rle_dec (canonical_val root w (clock_of (MRhatGt d p q)) (pred n)) d)
+        destruct (Rle_dec' (canonical_val root w ((MRhatGt d p q)) (pred n)) d)
           as [Hlt | Hnlt].
         - exact Hlt.
         - exfalso.
@@ -3315,7 +3406,7 @@ Proof.
           assert (Hel : 0 <= elapsed w (pred n) j).
           { apply elapsed_nonnegative. exact Hkj. }
           assert (Hthreshold :
-            d < canonical_val root w (clock_of (MRhatGt d p q)) (pred n) +
+            d < canonical_val root w ((MRhatGt d p q)) (pred n) +
                  elapsed w (pred n) j) by lra.
           exact (Hres j Hkj Hthreshold).
       }
@@ -3381,7 +3472,7 @@ Proof.
           ~ rhatgt_event root w path d p q k).
         { apply Hfirst. lia. }
         unfold c_le; simpl.
-        destruct (Rle_dec (canonical_val root w (clock_of (MRhatGt d p q)) k) d)
+        destruct (Rle_dec' (canonical_val root w ((MRhatGt d p q)) k) d)
           as [Hlt | Hnlt].
         -- exact Hlt.
         -- exfalso.
@@ -3393,7 +3484,7 @@ Proof.
            assert (Hel : 0 <= elapsed w k j).
            { apply elapsed_nonnegative. exact Hkj. }
            assert (Hthreshold :
-             d < canonical_val root w (clock_of (MRhatGt d p q)) k + elapsed w k j)
+             d < canonical_val root w ((MRhatGt d p q)) k + elapsed w k j)
              by lra.
            exact (Hres j Hkj Hthreshold).
       * unfold unch_at, canonical_ext; simpl.
@@ -3410,9 +3501,9 @@ Proof.
         assert (Hnoevent_k :
           ~ rhatgt_event root w path d p q k).
         { apply Hfirst. lia. }
-        assert (Hlt : canonical_val root w (clock_of (MRhatGt d p q)) k <= d).
+        assert (Hlt : canonical_val root w ((MRhatGt d p q)) k <= d).
         {
-          destruct (Rle_dec (canonical_val root w (clock_of (MRhatGt d p q)) k) d)
+          destruct (Rle_dec' (canonical_val root w ((MRhatGt d p q)) k) d)
             as [Hlt | Hnlt].
           - exact Hlt.
           - exfalso.
@@ -3424,7 +3515,7 @@ Proof.
             assert (Hel : 0 <= elapsed w k j).
             { apply elapsed_nonnegative. exact Hkj. }
             assert (Hthreshold :
-              d < canonical_val root w (clock_of (MRhatGt d p q)) k + elapsed w k j)
+              d < canonical_val root w ((MRhatGt d p q)) k + elapsed w k j)
               by lra.
             exact (Hres j Hkj Hthreshold).
         }
@@ -3457,7 +3548,7 @@ Proof.
         exists k. split; assumption.
       }
       unfold c_le; simpl.
-      destruct (Rle_dec (canonical_val root w (clock_of (MRhatGt d p q)) k) d)
+      destruct (Rle_dec' (canonical_val root w ((MRhatGt d p q)) k) d)
         as [Hlt | Hnlt].
       * exact Hlt.
       * exfalso.
@@ -3469,7 +3560,7 @@ Proof.
         assert (Hel : 0 <= elapsed w k j).
         { apply elapsed_nonnegative. exact Hkj. }
         assert (Hthreshold :
-          d < canonical_val root w (clock_of (MRhatGt d p q)) k + elapsed w k j)
+          d < canonical_val root w ((MRhatGt d p q)) k + elapsed w k j)
           by lra.
         exact (Hres j Hkj Hthreshold).
     + unfold unch_at, canonical_ext; simpl.
@@ -3489,9 +3580,9 @@ Proof.
         apply Hnever.
         exists k. split; assumption.
       }
-      assert (Hlt : canonical_val root w (clock_of (MRhatGt d p q)) k <= d).
+      assert (Hlt : canonical_val root w ((MRhatGt d p q)) k <= d).
       {
-        destruct (Rle_dec (canonical_val root w (clock_of (MRhatGt d p q)) k) d)
+        destruct (Rle_dec' (canonical_val root w ((MRhatGt d p q)) k) d)
           as [Hlt | Hnlt].
         - exact Hlt.
         - exfalso.
@@ -3503,7 +3594,7 @@ Proof.
           assert (Hel : 0 <= elapsed w k j).
           { apply elapsed_nonnegative. exact Hkj. }
           assert (Hthreshold :
-            d < canonical_val root w (clock_of (MRhatGt d p q)) k + elapsed w k j)
+            d < canonical_val root w ((MRhatGt d p q)) k + elapsed w k j)
             by lra.
           exact (Hres j Hkj Hthreshold).
       }
@@ -4034,7 +4125,7 @@ Proof.
   - exact EncodingCorrect_proved.
   - exact Hwf.
 Qed.
-
+Print Assumptions MTL_to_TBA_correct.
 (*
   Intended audit after compilation:
 
