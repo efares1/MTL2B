@@ -4120,6 +4120,21 @@ Proof.
   - exact Hwf.
 Qed.
 Print Assumptions MTL_to_TBA_correct.
+
+(* The same result for the Buchi automaton returned by any correct
+   LTL-to-Buchi translator, e.g. Spot called by the tool: no project axiom
+   is used, the correctness of the translator is a hypothesis. *)
+Theorem MTL_to_TBA_correct_with :
+  forall (f : mtl) (A : PBuchi f) (w : timed_word),
+    (forall s : pword f, PBA_accepts A s <-> psat s 0 (T f)) ->
+    well_formed f ->
+    (msat w 0 f <-> TBA_accepts (compile_with A) w).
+Proof.
+  intros f A w HA Hwf.
+  apply compile_with_correct_from_encoding;
+    [exact EncodingCorrect_proved | exact HA | exact Hwf].
+Qed.
+Print Assumptions MTL_to_TBA_correct_with.
 (*
   Intended audit after compilation:
 

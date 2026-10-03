@@ -104,4 +104,5 @@ Extract Inlined Constant Req_dec_T => "(=)".
 Definition optimize_export {root : mtl} (n : nat) (A : TBA root) : DTA root :=
   export (optimize n A).
 
-Extraction "optim.ml" optimized optimize export optimize_export.
+Extraction "optim.ml" optimized optimize export optimize_export T ltl_atoms compile_with
+  timed_subformulas MUle MUlt MUge MUgt MRle MRlt MRge MRgt.

@@ -1,0 +1,37 @@
+\begin{table*}[t]
+\centering
+\caption{Evaluation of \texttt{mtl2tba} and comparison with CASAAL. $|X|$: distinct timed subformulas of the formula. Spot: B\"uchi automaton returned by Spot (states/transitions, one transition per cube). Opt.: after reset completion and the verified optimizations (locations/transitions/clocks). Export: automaton for UPPAAL (locations/transitions/clocks/locations with an invariant/difference constraints). Time: whole chain, in seconds. CASAAL: states/transitions/clocks; $\dagger$: not equivalent (CASAAL has no hatted operators).}
+\label{tab:evaluation}
+\small
+\begin{tabular}{@{}llrrrrrrrrrrrrr@{}}
+\toprule
+ & & & \multicolumn{2}{c}{Spot} & \multicolumn{3}{c}{Opt.} & \multicolumn{5}{c}{Export} & & CASAAL\\
+\cmidrule(lr){4-5}\cmidrule(lr){6-8}\cmidrule(lr){9-13}
+Id & Property & $|X|$ & st & tr & loc & tr & clk & loc & tr & clk & inv & diff & Time & st/tr/clk\\
+\midrule
+F1 & bounded response & 1 & 3 & 7 & 3 & 7 & 1 & 4 & 10 & 1 & 2 & 0 & 0.02 & 2/4/1\\
+F2 & bounded invariance & 1 & 2 & 5 & 1 & 1 & 0 & 2 & 2 & 0 & 0 & 0 & 0.02 & 2/5/1\\
+F3 & sporadicity (hatted) & 1 & 2 & 5 & 2 & 5 & 1 & 3 & 7 & 1 & 0 & 0 & 0.02 & 3/6/1$^\dagger$\\
+F3b & sporadicity, no hat & 1 & 1 & 1 & 1 & 1 & 0 & 2 & 2 & 0 & 0 & 0 & 0.02 & 1/1/0\\
+F4 & time-bounded until & 1 & 3 & 7 & 3 & 7 & 1 & 4 & 10 & 1 & 2 & 0 & 0.02 & 2/4/1\\
+F5 & minimum delay response & 1 & 7 & 38 & 7 & 25 & 1 & 8 & 27 & 1 & 0 & 0 & 0.03 & 4/19/1\\
+F6 & strict minimum delay response & 1 & 7 & 38 & 7 & 25 & 1 & 8 & 27 & 1 & 0 & 0 & 0.03 & 4/19/1\\
+F7 & bounded recurrence & 1 & 3 & 6 & 3 & 6 & 1 & 4 & 8 & 1 & 2 & 0 & 0.02 & 2/4/1\\
+F8 & recurrence with minimum delay & 1 & 5 & 15 & 5 & 15 & 1 & 6 & 19 & 1 & 0 & 0 & 0.03 & 2/4/1\\
+F9 & Example 1 & 2 & 5 & 16 & 5 & 16 & 2 & 6 & 25 & 2 & 4 & 0 & 0.03 & 4/9/2\\
+F10 & Example 2 & 3 & 6 & 23 & 5 & 16 & 3 & 6 & 25 & 3 & 4 & 0 & 0.04 & 5/12/3\\
+F11 & Example 3 & 2 & 5 & 11 & 4 & 7 & 1 & 4 & 7 & 1 & 2 & 0 & 0.04 & 4/7/2\\
+F12 & response within a window & 2 & 5 & 23 & 4 & 13 & 2 & 5 & 15 & 2 & 3 & 0 & 0.06 & 3/9/2\\
+F13 & periodicity (hatted) & 2 & 6 & 23 & 4 & 9 & 2 & 4 & 9 & 2 & 3 & 0 & 0.07 & 4/7/2$^\dagger$\\
+F14 & closeness & 2 & 8 & 38 & 8 & 25 & 2 & 9 & 32 & 2 & 6 & 2 & 0.13 & 8/22/2\\
+R1 & 1 bounded response & 1 & 3 & 7 & 3 & 7 & 1 & 4 & 10 & 1 & 2 & 0 & 0.03 & 2/4/1\\
+R2 & 2 bounded responses & 2 & 8 & 45 & 7 & 27 & 2 & 8 & 38 & 2 & 6 & 4 & 0.07 & 4/16/2\\
+R3 & 3 bounded responses & 3 & 20 & 275 & 17 & 90 & 3 & 18 & 152 & 3 & 16 & 78 & 0.25 & 8/64/3\\
+R4 & 4 bounded responses & 4 & 48 & 1625 & 41 & 276 & 4 & 42 & 588 & 4 & 40 & 606 & 3.12 & 16/256/4\\
+N1 & nesting depth 1 & 1 & 3 & 5 & 3 & 5 & 1 & 3 & 5 & 1 & 1 & 0 & 0.02 & 3/5/1\\
+N2 & nesting depth 2 & 2 & 5 & 19 & 5 & 14 & 2 & 6 & 26 & 2 & 4 & 4 & 0.03 & 4/9/2\\
+N3 & nesting depth 3 & 3 & 9 & 94 & 9 & 50 & 3 & 14 & 173 & 3 & 12 & 68 & 0.10 & 5/14/3\\
+N4 & nesting depth 4 & 4 & 17 & 501 & 17 & 184 & 4 & 34 & 1035 & 4 & 32 & 672 & 3.22 & 6/20/4\\
+\bottomrule
+\end{tabular}
+\end{table*}

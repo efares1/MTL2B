@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.1//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_2.dtd'>
+<nta>
+  <declaration>chan p, other;</declaration>
+  <template>
+    <name>Property</name>
+    <declaration>clock x0;</declaration>
+    <location id="id1" x="0" y="0">
+      <name>L1</name>
+    </location>
+    <location id="id2" x="200" y="0">
+      <name>L2</name>
+      <label kind="invariant">x0 &lt;= 5</label>
+    </location>
+    <location id="id6" x="400" y="0">
+      <name>A6</name>
+    </location>
+    <location id="id8" x="600" y="0">
+      <name>L8</name>
+      <label kind="invariant">x0 &lt;= 5</label>
+    </location>
+    <init ref="id1"/>
+    <transition>
+      <source ref="id8"/>
+      <target ref="id8"/>
+      <label kind="guard">x0 &lt;= 5</label>
+      <label kind="synchronisation">other?</label>
+    </transition>
+    <transition>
+      <source ref="id8"/>
+      <target ref="id6"/>
+      <label kind="guard">x0 &lt;= 5</label>
+      <label kind="synchronisation">p?</label>
+    </transition>
+    <transition>
+      <source ref="id6"/>
+      <target ref="id6"/>
+      <label kind="synchronisation">p?</label>
+    </transition>
+    <transition>
+      <source ref="id6"/>
+      <target ref="id6"/>
+      <label kind="synchronisation">other?</label>
+    </transition>
+    <transition>
+      <source ref="id2"/>
+      <target ref="id2"/>
+      <label kind="guard">x0 &lt;= 5</label>
+      <label kind="synchronisation">other?</label>
+    </transition>
+    <transition>
+      <source ref="id2"/>
+      <target ref="id8"/>
+      <label kind="guard">x0 &gt;= 2 &amp;&amp; x0 &lt;= 5</label>
+      <label kind="synchronisation">other?</label>
+    </transition>
+    <transition>
+      <source ref="id2"/>
+      <target ref="id6"/>
+      <label kind="guard">x0 &lt;= 5 &amp;&amp; x0 &gt;= 2</label>
+      <label kind="synchronisation">p?</label>
+    </transition>
+    <transition>
+      <source ref="id1"/>
+      <target ref="id2"/>
+      <label kind="synchronisation">other?</label>
+      <label kind="assignment">x0 = 0</label>
+    </transition>
+  </template>
+  <template>
+    <name>Env</name>
+    <location id="env0" x="0" y="0"/>
+    <init ref="env0"/>
+    <transition>
+      <source ref="env0"/>
+      <target ref="env0"/>
+      <label kind="synchronisation">p!</label>
+    </transition>
+    <transition>
+      <source ref="env0"/>
+      <target ref="env0"/>
+      <label kind="synchronisation">other!</label>
+    </transition>
+  </template>
+  <system>P = Property();
+E = Env();
+system P, E;</system>
+</nta>

@@ -325,7 +325,7 @@ Definition upper_clocks (o : option (clock_constraint root)) : list (Clock root)
 (* Candidate clocks of the invariant of location [l]: those bounded by some
    outgoing guard (a clock outside this list cannot be in the invariant). *)
 Definition inv_clocks (A : TBA root) (l : nat) : list (Clock root) :=
-  flat_map (fun t => flat_map upper_clocks (bt_guard t)) (outgoing A l).
+  nodup (@clock_eq_dec root) (flat_map (fun t => flat_map upper_clocks (bt_guard t)) (outgoing A l)).
 
 (* The invariant of [l] after the resets [Z], as guard items:
    x <= M for a clock not in Z, and 0 <= M for a clock in Z, which is

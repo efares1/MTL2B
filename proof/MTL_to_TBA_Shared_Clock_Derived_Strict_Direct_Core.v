@@ -957,7 +957,7 @@ Fixpoint ltl_clocks (f : ltl) : list (Clock root) :=
   end.
 
 (* ====================================================================== *)
-(* 8. Automata returned by ltl_to_buchi: LATom-labelled Buchi automata    *)
+(* 8. Automata returned by the LTL-to-Buchi back-end                      *)
 (* ====================================================================== *)
 
 (* A Buchi letter contains only the visible, untimed action proposition.
@@ -980,57 +980,81 @@ Definition alit_holds (p : Action) (l : alit) : Prop :=
 Definition label_holds (ls : list alit) (le : letter) : Prop :=
   Forall (alit_holds (letter_action le)) ls.
 
-Record latom_transition : Type := {
-  lat_bt_source : nat;
-  lat_bt_label : list latom;
-  lat_bt_target : nat
-}.
+(* The LTL-to-Buchi back-end treats the atoms of the extended alphabet as
+   independent propositions.  Its input is a propositional word: a truth
+   value for every atom at every position. *)
+Definition pword : Type := nat -> latom -> Prop.
 
-(* Ordinary Buchi automaton returned by the LTL-to-Buchi back-end. *)
-Record Buchi : Type := {
-  ba_nstates : nat;
-  ba_init : nat;
-  ba_transitions : list latom_transition;
-  ba_accepting : list nat
-}.
-
-(* The reset atoms occurring on a LATom-labelled transition determine its
-   reset set.  A clock absent from this list is not reset by that transition.
-   Thus [LUnch x] is represented implicitly: it means precisely that
-   [x] is absent from the reset set.  Since [Clock root] is finite, a
-   transition can list every clock it resets. *)
-Fixpoint resets_of_atoms (atoms : list latom) : list (Clock root) :=
-  match atoms with
-  | [] => []
-  | LRst x :: tl => x :: resets_of_atoms tl
-  | _ :: tl => resets_of_atoms tl
+Fixpoint psat (s : pword) (i : nat) (f : ltl) : Prop :=
+  match f with
+  | LTrue => True
+  | LFalse => False
+  | LAtom a => s i a
+  | LAnd p q => psat s i p /\ psat s i q
+  | LOr p q => psat s i p \/ psat s i q
+  | LNext p => psat s (S i) p
+  | LUntil p q =>
+      exists j,
+        (i <= j)%nat /\ psat s j q /\ (forall k, (i <= k < j)%nat -> psat s k p)
+  | LRelease p q =>
+      forall j,
+        (i <= j)%nat ->
+        psat s j q \/ exists k, (i <= k < j)%nat /\ psat s k p
   end.
 
+(* The propositional word of an extended word: the truth values of its
+   atoms. *)
+Definition word_of (rho : ext_word) : pword := fun i a => atom_sat rho i a.
+
+Fixpoint ltl_atoms (f : ltl) : list latom :=
+  match f with
+  | LTrue | LFalse => []
+  | LAtom a => [a]
+  | LAnd p q | LOr p q | LUntil p q | LRelease p q => ltl_atoms p ++ ltl_atoms q
+  | LNext p => ltl_atoms p
+  end.
+
+(* Literals: (a, true) is the atom a, (a, false) its negation.  The
+   transitions of the automaton returned by the back-end are labelled by
+   cubes, i.e. lists of literals. *)
+Definition plit : Type := (latom * bool)%type.
+
+Definition plit_holds (s : pword) (i : nat) (l : plit) : Prop :=
+  if snd l then s i (fst l) else ~ s i (fst l).
+
+Record ptransition : Type := {
+  pt_src : nat;
+  pt_label : list plit;
+  pt_tgt : nat
+}.
+
+Record PBuchi : Type := {
+  pb_nstates : nat;
+  pb_init : nat;
+  pb_trans : list ptransition;
+  pb_accepting : list nat
+}.
+
+Definition PBA_accepts (A : PBuchi) (s : pword) : Prop :=
+  exists run : nat -> nat,
+    run 0%nat = pb_init A /\
+    (forall i,
+       (run i < pb_nstates A)%nat /\
+       exists t,
+         In t (pb_trans A) /\
+         pt_src t = run i /\
+         pt_tgt t = run (S i) /\
+         Forall (plit_holds s i) (pt_label t)) /\
+    (forall n, exists j, (n <= j)%nat /\ In (run j) (pb_accepting A)).
+
+(* A transition of a timed automaton is read along an extended word only if
+   the reset decisions of the word are exactly its reset list. *)
 Definition resets_match
     (rho : ext_word) (i : nat) (resets : list (Clock root)) : Prop :=
   forall x, ew_reset rho i x = true <-> In x resets.
 
-Definition latom_transition_enabled
-    (rho : ext_word) (i : nat) (t : latom_transition) : Prop :=
-  Forall (atom_sat rho i) (lat_bt_label t) /\
-  resets_match rho i (resets_of_atoms (lat_bt_label t)).
-
-Definition BA_accepts (A : Buchi) (rho : ext_word) : Prop :=
-  exists run : nat -> nat,
-    run 0%nat = ba_init A /\
-    (forall i,
-       (run i < ba_nstates A)%nat /\
-       exists t,
-         In t (ba_transitions A) /\
-         lat_bt_source t = run i /\
-         lat_bt_target t = run (S i) /\
-         latom_transition_enabled rho i t) /\
-    (forall n,
-       exists j,
-         (n <= j)%nat /\ In (run j) (ba_accepting A)).
-
 (* ====================================================================== *)
-(* 9. Explicit Buchi -> Timed Buchi Automaton conversion                  *)
+(* 9. Timed Buchi automata                                                *)
 (* ====================================================================== *)
 
 Inductive clock_comparison : Type :=
@@ -1043,14 +1067,6 @@ Record clock_constraint : Type := {
 }.
 
 Definition guard := list (option clock_constraint).
-
-(* Action literal of an atom, if any. *)
-Definition atom_lit (a : latom) : list alit :=
-  match a with
-  | LAct q => [(q, true)]
-  | LNAct q => [(q, false)]
-  | _ => []
-  end.
 
 Definition atom_to_guard (a : latom) : option clock_constraint :=
   match a with
@@ -1082,16 +1098,6 @@ Definition guard_item_holds
   | None => True
   end.
 
-(* A label is consistent when no clock carries both an unchanged marker and
-   a reset marker; an inconsistent transition can never be taken. *)
-Definition markers_ok (atoms : list latom) : bool :=
-  forallb (fun a => match a with
-                    | LUnch x =>
-                        negb (existsb (fun y => if clock_eq_dec y x then true else false)
-                                      (resets_of_atoms atoms))
-                    | _ => true
-                    end) atoms.
-
 Record tba_transition : Type := {
   bt_source : nat;
   bt_label : list alit;
@@ -1100,8 +1106,8 @@ Record tba_transition : Type := {
   bt_target : nat
 }.
 
-(* This is the actual Timed Buchi Automaton produced by the conversion.
-   Its clocks are the elements of [Clock root]. *)
+(* The Timed Buchi Automaton produced by the construction.  Its clocks are
+   the elements of [Clock root]. *)
 Record TBA : Type := {
   tba_nstates : nat;
   tba_init : nat;
@@ -1114,23 +1120,6 @@ Definition tba_transition_enabled
   label_holds (bt_label t) (letter_of rho i) /\
   Forall (guard_item_holds rho i) (bt_guard t) /\
   resets_match rho i (bt_resets t).
-
-Definition convert_transition (t : latom_transition) : tba_transition :=
-  let atoms := lat_bt_label t in
-  {| bt_source := lat_bt_source t;
-     bt_label := flat_map atom_lit atoms;
-     bt_guard := map atom_to_guard atoms;
-     bt_resets := resets_of_atoms atoms;
-     bt_target := lat_bt_target t |}.
-
-(* Inconsistent transitions are dropped. *)
-Definition convert_buchi_to_tba (A : Buchi) : TBA :=
-  {| tba_nstates := ba_nstates A;
-     tba_init := ba_init A;
-     tba_transitions :=
-       map convert_transition
-           (filter (fun t => markers_ok (lat_bt_label t)) (ba_transitions A));
-     tba_accepting := ba_accepting A |}.
 
 Definition TBA_ext_accepts (A : TBA) (rho : ext_word) : Prop :=
   exists run : nat -> nat,
@@ -1175,7 +1164,6 @@ Arguments LG {root} _.
 Arguments LW {root} _ _.
 Arguments LGF {root} _.
 Arguments T_at {root} _ _.
-Arguments atom_lit {root} _.
 Arguments atom_to_guard {root} _.
 
 
@@ -1240,174 +1228,618 @@ Proof.
   - exact (proj2_sig x).
 Qed.
 
+Arguments word_of {root} _ _ _.
+Arguments psat {root} _ _ _.
+Arguments ltl_atoms {root} _.
+Arguments plit_holds {root} _ _ _.
+
 (* ====================================================================== *)
-(* 9b. Correctness of the Buchi -> TBA conversion                         *)
+(* 9b. Propositional semantics of LTL over the extended alphabet          *)
 (* ====================================================================== *)
 
-Lemma clock_in_b :
-  forall root (x : Clock root) l,
-    existsb (fun y => if clock_eq_dec y x then true else false) l = true <-> In x l.
+Section Completion.
+
+Variable root : mtl.
+
+Lemma lsat_psat :
+  forall (rho : ext_word root) (f : ltl root) i,
+    lsat rho i f <-> psat (word_of rho) i f.
 Proof.
-  intros root x l. rewrite existsb_exists. split.
-  - intros [y [Hy Hb]]. destruct (clock_eq_dec y x) as [->|_]; [exact Hy | discriminate].
-  - intro H. exists x. split; [exact H|].
-    destruct (clock_eq_dec x x) as [_|N]; [reflexivity | exfalso; apply N; reflexivity].
+  intros rho f.
+  induction f as [| | a | p IHp q IHq | p IHp q IHq | p IHp | p IHp q IHq | p IHp q IHq];
+    intro i; simpl.
+  - tauto.
+  - tauto.
+  - unfold word_of. tauto.
+  - rewrite IHp, IHq. tauto.
+  - rewrite IHp, IHq. tauto.
+  - apply IHp.
+  - split; intros [j [Hij [Hq Hp]]]; exists j; split; try exact Hij;
+      split; try (apply IHq; exact Hq);
+      intros k Hk; apply IHp; apply Hp; exact Hk.
+  - split; intros H j Hj; destruct (H j Hj) as [Hq | [k [Hk Hp]]];
+      try (left; apply IHq; exact Hq);
+      right; exists k; split; try exact Hk; apply IHp; exact Hp.
 Qed.
 
-Lemma in_resets_of_atoms :
-  forall root (atoms : list (latom root)) x,
-    In (LRst x) atoms -> In x (resets_of_atoms atoms).
+(* LTL formulas have no negation: satisfaction is monotone in the atoms. *)
+Lemma psat_mono :
+  forall (f : ltl root) (s s' : pword root),
+    (forall i a, In a (ltl_atoms f) -> s i a -> s' i a) ->
+    forall i, psat s i f -> psat s' i f.
 Proof.
-  intros root atoms x. induction atoms as [|a atoms IH]; intro H; [contradiction|].
-  destruct H as [->|H]; simpl; [left; reflexivity|].
-  destruct a; try (apply IH; exact H). right. apply IH. exact H.
+  intros f s s'.
+  induction f as [| | a | p IHp q IHq | p IHp q IHq | p IHp | p IHp q IHq | p IHp q IHq];
+    intros Hm i H; simpl in *.
+  - exact I.
+  - exact H.
+  - apply Hm; [left; reflexivity | exact H].
+  - assert (Hp : forall i a, In a (ltl_atoms p) -> s i a -> s' i a)
+      by (intros k a Ha; apply Hm; apply in_or_app; left; exact Ha).
+    assert (Hq : forall i a, In a (ltl_atoms q) -> s i a -> s' i a)
+      by (intros k a Ha; apply Hm; apply in_or_app; right; exact Ha).
+    destruct H as [H1 H2]. split; [exact (IHp Hp i H1) | exact (IHq Hq i H2)].
+  - assert (Hp : forall i a, In a (ltl_atoms p) -> s i a -> s' i a)
+      by (intros k a Ha; apply Hm; apply in_or_app; left; exact Ha).
+    assert (Hq : forall i a, In a (ltl_atoms q) -> s i a -> s' i a)
+      by (intros k a Ha; apply Hm; apply in_or_app; right; exact Ha).
+    destruct H as [H1|H2]; [left; exact (IHp Hp i H1) | right; exact (IHq Hq i H2)].
+  - exact (IHp Hm (S i) H).
+  - assert (Hp : forall i a, In a (ltl_atoms p) -> s i a -> s' i a)
+      by (intros k a Ha; apply Hm; apply in_or_app; left; exact Ha).
+    assert (Hq : forall i a, In a (ltl_atoms q) -> s i a -> s' i a)
+      by (intros k a Ha; apply Hm; apply in_or_app; right; exact Ha).
+    destruct H as [j [Hij [Hj Hk]]]. exists j. split; [exact Hij|].
+    split; [exact (IHq Hq j Hj)|]. intros k Hk'. exact (IHp Hp k (Hk k Hk')).
+  - assert (Hp : forall i a, In a (ltl_atoms p) -> s i a -> s' i a)
+      by (intros k a Ha; apply Hm; apply in_or_app; left; exact Ha).
+    assert (Hq : forall i a, In a (ltl_atoms q) -> s i a -> s' i a)
+      by (intros k a Ha; apply Hm; apply in_or_app; right; exact Ha).
+    intros j Hj. destruct (H j Hj) as [Hj' | [k [Hk Hk']]].
+    + left. exact (IHq Hq j Hj').
+    + right. exists k. split; [exact Hk | exact (IHp Hp k Hk')].
 Qed.
 
-(* Under consistent markers, an atom of a label holds iff its action literal
-   and its clock constraint hold; the markers are those of the reset list. *)
-Lemma atom_sat_split :
-  forall root (rho : ext_word root) i atoms a,
-    resets_match rho i (resets_of_atoms atoms) ->
-    markers_ok atoms = true ->
-    In a atoms ->
-    (atom_sat rho i a <->
-     Forall (alit_holds (tw_action (ew_base rho) i)) (atom_lit a) /\
-     guard_item_holds rho i (atom_to_guard a)).
+(* ====================================================================== *)
+(* 9c. Choice of a transition along a run                                 *)
+(* ====================================================================== *)
+
+(* The first element of a list that satisfies [P] (classical decision). *)
+Fixpoint first_such {A : Type} (P : A -> Prop) (l : list A) : option A :=
+  match l with
+  | [] => None
+  | x :: l' => if decide_b (P x) then Some x else first_such P l'
+  end.
+
+Lemma first_such_spec :
+  forall (A : Type) (P : A -> Prop) (l : list A),
+    (exists x, In x l /\ P x) ->
+    exists x, first_such P l = Some x /\ In x l /\ P x.
 Proof.
-  intros root rho i atoms a Hres Hok Hin.
-  destruct a as [p|p|x d|x d|x d|x d|x|x]; simpl;
-    unfold c_le, c_lt, c_ge, c_gt, rst_at, unch_at, alit_holds; simpl.
-  - split; [intro H; split; [constructor; [exact H | constructor] | exact I]|].
-    intros [H _]. inversion H; assumption.
-  - split; [intro H; split; [constructor; [exact H | constructor] | exact I]|].
-    intros [H _]. inversion H; assumption.
-  - split; [intro H; split; [constructor | exact H] | tauto].
-  - split; [intro H; split; [constructor | exact H] | tauto].
-  - split; [intro H; split; [constructor | exact H] | tauto].
-  - split; [intro H; split; [constructor | exact H] | tauto].
-  - split; [intros _; split; [constructor | exact I]|].
-    intros _. apply (proj2 (Hres x)). apply in_resets_of_atoms. exact Hin.
-  - split; [intros _; split; [constructor | exact I]|].
-    intros _. unfold markers_ok in Hok. rewrite forallb_forall in Hok.
-    specialize (Hok _ Hin). simpl in Hok. apply negb_true_iff in Hok.
-    destruct (ew_reset rho i x) eqn:E; [|reflexivity].
-    apply (proj1 (Hres x)) in E. apply (clock_in_b x) in E. congruence.
+  intros A P l. induction l as [|y l IH]; intros [x [Hx HP]]; [contradiction|].
+  simpl. destruct (decide_b (P y)) eqn:E.
+  - exists y. split; [reflexivity|]. split; [left; reflexivity|].
+    apply decide_b_spec. exact E.
+  - destruct Hx as [<-|Hx].
+    + exfalso. apply decide_b_spec in HP. congruence.
+    + destruct (IH (ex_intro _ x (conj Hx HP))) as [z [Hz [Hin HPz]]].
+      exists z. split; [exact Hz|]. split; [right; exact Hin | exact HPz].
 Qed.
 
-Lemma Forall_atom_sat_split :
-  forall root (rho : ext_word root) i atoms l,
-    resets_match rho i (resets_of_atoms atoms) ->
-    markers_ok atoms = true ->
-    incl l atoms ->
-    (Forall (atom_sat rho i) l <->
-     Forall (alit_holds (tw_action (ew_base rho) i)) (flat_map atom_lit l) /\
-     Forall (guard_item_holds rho i) (map atom_to_guard l)).
+(* ====================================================================== *)
+(* 9d. Decidable equality of atoms                                        *)
+(* ====================================================================== *)
+
+Definition latom_eq_dec : forall a b : latom root, {a = b} + {a <> b}.
 Proof.
-  intros root rho i atoms l Hres Hok.
-  induction l as [|a l IH]; intro Hincl; simpl.
-  - split; [intros _; split; constructor | intros _; constructor].
-  - assert (Ha : In a atoms) by (apply Hincl; left; reflexivity).
-    assert (Hl : incl l atoms) by (intros y Hy; apply Hincl; right; exact Hy).
-    specialize (IH Hl).
-    pose proof (atom_sat_split Hres Hok Ha) as Hsplit.
-    rewrite Forall_cons_iff, Forall_app, Forall_cons_iff, Hsplit, IH. tauto.
+  decide equality;
+    first [apply Nat.eq_dec | apply Req_EM_T | apply clock_eq_dec].
+Defined.
+
+Definition latom_eqb (a b : latom root) : bool :=
+  if latom_eq_dec a b then true else false.
+
+Lemma latom_eqb_true : forall a b, latom_eqb a b = true <-> a = b.
+Proof.
+  intros a b. unfold latom_eqb.
+  destruct (latom_eq_dec a b); split; intro H; congruence.
 Qed.
 
-(* An inconsistent label is never satisfied. *)
-Lemma markers_bad :
-  forall root (rho : ext_word root) i atoms,
-    resets_match rho i (resets_of_atoms atoms) ->
-    markers_ok atoms = false ->
-    ~ Forall (atom_sat rho i) atoms.
+Definition in_atoms (a : latom root) (l : list (latom root)) : bool :=
+  existsb (latom_eqb a) l.
+
+Lemma in_atoms_iff : forall a l, in_atoms a l = true <-> In a l.
 Proof.
-  intros root rho i atoms Hres Hbad Hall.
-  unfold markers_ok in Hbad.
-  destruct (forallb _ atoms) eqn:E; [discriminate|].
-  apply Bool.not_true_iff_false in E. apply E. apply forallb_forall.
-  intros a Ha. destruct a; try reflexivity.
-  rewrite Forall_forall in Hall. specialize (Hall _ Ha).
-  simpl in Hall. unfold unch_at in Hall.
-  apply negb_true_iff. destruct (existsb _ _) eqn:E2; [|reflexivity].
-  apply (clock_in_b c) in E2. apply (proj2 (Hres c)) in E2. congruence.
+  intros a l. unfold in_atoms. rewrite existsb_exists. split.
+  - intros [b [Hb E]]. apply latom_eqb_true in E. subst b. exact Hb.
+  - intro H. exists a. split; [exact H|]. apply latom_eqb_true. reflexivity.
 Qed.
 
-Lemma latom_transition_conversion_correct :
-  forall root (rho : ext_word root) i (t : latom_transition root),
-    markers_ok (lat_bt_label t) = true ->
-    (latom_transition_enabled rho i t <->
-     tba_transition_enabled rho i (convert_transition t)).
+(* ====================================================================== *)
+(* 9e. Relaxation                                                         *)
+(* ====================================================================== *)
+
+(* Extended atoms: clock guards and reset/unchanged markers. *)
+Definition is_ext (a : latom root) : bool :=
+  match a with
+  | LAct _ | LNAct _ => false
+  | _ => true
+  end.
+
+Definition lit_conflict (p q : plit root) : bool :=
+  latom_eqb (fst p) (fst q) && xorb (snd p) (snd q).
+
+(* A cube is consistent when it contains no atom together with its
+   negation; an inconsistent cube is never satisfied. *)
+Definition consistent (l : list (plit root)) : bool :=
+  forallb (fun p => negb (existsb (lit_conflict p) l)) l.
+
+Lemma consistent_holds :
+  forall (s : pword root) i l, Forall (plit_holds s i) l -> consistent l = true.
 Proof.
-  intros root rho i [src atoms dst] Hok.
-  unfold latom_transition_enabled, tba_transition_enabled, convert_transition,
-         label_holds.
-  simpl in *. split.
-  - intros [Hatoms Hres].
-    destruct (proj1 (Forall_atom_sat_split Hres Hok (incl_refl atoms)) Hatoms)
-      as [Hlab Hguard].
-    split; [exact Hlab|]. split; [exact Hguard | exact Hres].
-  - intros [Hlab [Hguard Hres]].
-    split; [|exact Hres].
-    apply (proj2 (Forall_atom_sat_split Hres Hok (incl_refl atoms))).
-    split; assumption.
+  intros s i l H. unfold consistent. apply forallb_forall. intros p Hp.
+  apply negb_true_iff. destruct (existsb (lit_conflict p) l) eqn:E; [|reflexivity].
+  exfalso. apply existsb_exists in E. destruct E as [q [Hq Hc]].
+  rewrite Forall_forall in H. pose proof (H p Hp) as H1. pose proof (H q Hq) as H2.
+  destruct p as [a b], q as [a' b']. unfold lit_conflict in Hc. simpl in *.
+  apply andb_true_iff in Hc. destruct Hc as [Ha Hb].
+  apply latom_eqb_true in Ha. subst a'.
+  unfold plit_holds in *. simpl in *.
+  destruct b, b'; simpl in Hb; try discriminate; tauto.
 Qed.
 
-Lemma convert_buchi_to_tba_correct :
-  forall root (A : Buchi root) (rho : ext_word root),
-    BA_accepts A rho <->
-    TBA_ext_accepts (convert_buchi_to_tba A) rho.
+Lemma consistent_no_conflict :
+  forall l a, consistent l = true -> In (a, true) l -> In (a, false) l -> False.
 Proof.
-  intros root A rho.
-  unfold BA_accepts, TBA_ext_accepts, convert_buchi_to_tba. simpl.
+  intros l a Hc H1 H2. unfold consistent in Hc. rewrite forallb_forall in Hc.
+  specialize (Hc _ H1). apply negb_true_iff in Hc.
+  assert (E : existsb (lit_conflict (a, true)) l = true).
+  { apply existsb_exists. exists (a, false). split; [exact H2|].
+    unfold lit_conflict. simpl. rewrite andb_true_iff. split; [|reflexivity].
+    apply latom_eqb_true. reflexivity. }
+  congruence.
+Qed.
+
+(* Relaxation keeps the action literals and the positive literals over the
+   extended atoms of the formula [F]; the other literals over extended atoms
+   are dropped.  Inconsistent cubes are removed. *)
+Definition keep_lit (F : list (latom root)) (p : plit root) : bool :=
+  negb (is_ext (fst p)) || (snd p && in_atoms (fst p) F).
+
+Definition relax_trans (F : list (latom root)) (t : ptransition root) : ptransition root :=
+  {| pt_src := pt_src t; pt_label := filter (keep_lit F) (pt_label t); pt_tgt := pt_tgt t |}.
+
+Definition relax (F : list (latom root)) (A : PBuchi root) : PBuchi root :=
+  {| pb_nstates := pb_nstates A;
+     pb_init := pb_init A;
+     pb_trans := map (relax_trans F) (filter (fun t => consistent (pt_label t)) (pb_trans A));
+     pb_accepting := pb_accepting A |}.
+
+Lemma relax_complete :
+  forall F A (s : pword root), PBA_accepts A s -> PBA_accepts (relax F A) s.
+Proof.
+  intros F A s [run [Hinit [Hsteps Hacc]]].
+  exists run. split; [exact Hinit|]. split; [|exact Hacc].
+  intro i. destruct (Hsteps i) as [Hb [t [Ht [Hs [Hd Hl]]]]].
+  split; [exact Hb|]. exists (relax_trans F t). split.
+  - simpl. apply in_map. apply filter_In. split; [exact Ht|].
+    exact (consistent_holds Hl).
+  - simpl. split; [exact Hs|]. split; [exact Hd|].
+    rewrite Forall_forall in *. intros p Hp. apply filter_In in Hp.
+    apply Hl. exact (proj1 Hp).
+Qed.
+
+(* Relaxation preserves the language: a relaxed run on [s] is a run of the
+   original automaton on a word [s'] that differs from [s] only on extended
+   atoms, which it makes false (dropped negative literals) or true (dropped
+   atoms outside the formula); by monotonicity, [s] satisfies the formula. *)
+Lemma relax_sound :
+  forall (f : ltl root) A (s : pword root),
+    (forall s', PBA_accepts A s' -> psat s' 0 f) ->
+    PBA_accepts (relax (ltl_atoms f) A) s -> psat s 0 f.
+Proof.
+  intros f A s Hax [run [Hinit [Hsteps Hacc]]].
+  set (F := ltl_atoms f).
+  set (P := fun i (t : ptransition root) =>
+              consistent (pt_label t) = true /\ pt_src t = run i /\
+              pt_tgt t = run (S i) /\
+              Forall (plit_holds s i) (pt_label (relax_trans F t))).
+  assert (Hex : forall i, exists t, In t (pb_trans A) /\ P i t).
+  { intro i. destruct (Hsteps i) as [_ [t' [Ht' [Hs [Hd Hl]]]]].
+    simpl in Ht'. apply in_map_iff in Ht'. destruct Ht' as [t [<- Ht]].
+    apply filter_In in Ht. destruct Ht as [Ht Hc].
+    exists t. split; [exact Ht|]. split; [exact Hc|]. split; [exact Hs|].
+    split; [exact Hd | exact Hl]. }
+  set (lab := fun i => match first_such (P i) (pb_trans A) with
+                       | Some t => pt_label t | None => [] end).
+  set (s' := fun i (a : latom root) =>
+               if is_ext a
+               then (In (a, true) (lab i) /\ ~ In a F) \/ (s i a /\ ~ In (a, false) (lab i))
+               else s i a).
+  assert (Hrun : PBA_accepts A s').
+  { exists run. split; [exact Hinit|]. split; [|exact Hacc].
+    intro i. split; [exact (proj1 (Hsteps i))|].
+    destruct (first_such_spec (Hex i)) as [t [Hfs [Ht [Hc [Hs [Hd Hl]]]]]].
+    exists t. split; [exact Ht|]. split; [exact Hs|]. split; [exact Hd|].
+    assert (Hlab : lab i = pt_label t) by (unfold lab; rewrite Hfs; reflexivity).
+    apply Forall_forall. intros [a b] Hab.
+    rewrite Forall_forall in Hl. simpl in Hl.
+    unfold plit_holds. simpl. unfold s'. rewrite Hlab.
+    destruct (is_ext a) eqn:Hext.
+    - destruct b.
+      + destruct (in_atoms a F) eqn:HF.
+        * right. split.
+          -- assert (Hk : In (a, true) (filter (keep_lit F) (pt_label t))).
+             { apply filter_In. split; [exact Hab|].
+               unfold keep_lit. simpl. rewrite Hext, HF. reflexivity. }
+             exact (Hl _ Hk).
+          -- intro Hf. exact (consistent_no_conflict Hc Hab Hf).
+        * left. split; [exact Hab|]. intro Hin.
+          apply in_atoms_iff in Hin. congruence.
+      + intros [[Ht' _] | [_ Hn]].
+        * exact (consistent_no_conflict Hc Ht' Hab).
+        * exact (Hn Hab).
+    - assert (Hk : In (a, b) (filter (keep_lit F) (pt_label t))).
+      { apply filter_In. split; [exact Hab|].
+        unfold keep_lit. simpl. rewrite Hext. reflexivity. }
+      exact (Hl _ Hk). }
+  apply (psat_mono (s := s')); [|exact (Hax s' Hrun)].
+  intros i a Ha H. unfold s' in H. destruct (is_ext a).
+  - destruct H as [[_ Hn] | [H _]]; [contradiction | exact H].
+  - exact H.
+Qed.
+
+(* ====================================================================== *)
+(* 9f. Preservation and restart clocks                                    *)
+(* ====================================================================== *)
+
+(* The clock of a lower-bounded Until or of an upper-bounded Release is a
+   restart clock: it is tested only against lower bounds and constrained
+   only by reset markers.  The other clocks are preservation clocks: tested
+   only against upper bounds and constrained only by unchanged markers. *)
+Definition is_restart (x : Clock root) : bool :=
+  match proj1_sig x with
+  | MUhatGe _ _ _ | MUhatGt _ _ _ | MRhatLe _ _ _ | MRhatLt _ _ _ => true
+  | _ => false
+  end.
+
+Definition atom_ok (a : latom root) : Prop :=
+  match a with
+  | LCLe x _ | LCLt x _ | LUnch x => is_restart x = false
+  | LCGe x _ | LCGt x _ | LRst x => is_restart x = true
+  | _ => True
+  end.
+
+Lemma T_at_atoms_ok :
+  forall f path a, In a (ltl_atoms (T_at (root:=root) path f)) -> atom_ok a.
+Proof.
+  intro f.
+  induction f as [ | | b | b
+                 | p IHp q IHq | p IHp q IHq | p IHp
+                 | p IHp q IHq | p IHp q IHq
+                 | d p IHp q IHq | d p IHp q IHq | d p IHp q IHq
+                 | d p IHp q IHq | d p IHp q IHq | d p IHp q IHq
+                 | d p IHp q IHq | d p IHp q IHq ];
+    intros path a H; simpl in H.
+  all: try contradiction.
+  all: try (destruct H as [<- | []]; exact I).
+  all: try (apply in_app_or in H; destruct H as [H|H];
+            [exact (IHp _ _ H) | exact (IHq _ _ H)]).
+  all: try exact (IHp _ _ H).
+  all: destruct (clock_of root _) as [x|] eqn:Hc; [|contradiction].
+  all: pose proof (clock_of_proj Hc) as Hx.
+  all: unfold LW, LGF, LG, LF in H; simpl in H.
+  all: repeat (first [rewrite in_app_iff in H | progress simpl in H]).
+  all: repeat match goal with
+              | H : _ \/ _ |- _ => destruct H as [H|H]
+              end.
+  all: try contradiction.
+  all: try (subst a; unfold atom_ok, is_restart; rewrite Hx; reflexivity).
+  all: first [exact (IHp _ _ H) | exact (IHq _ _ H)].
+Qed.
+
+(* The clocks of [root], listed. *)
+Definition all_clocks : list (Clock root) :=
+  flat_map (fun F => match clock_of root F with Some x => [x] | None => [] end)
+           (timed_subformulas root).
+
+Lemma all_clocks_complete : forall x, In x all_clocks.
+Proof.
+  intros [F HF]. unfold all_clocks. apply in_flat_map. exists F.
+  split; [exact HF|]. rewrite (clock_of_mem HF). left. reflexivity.
+Qed.
+
+(* ====================================================================== *)
+(* 9g. Reset completion                                                   *)
+(* ====================================================================== *)
+
+Definition has_pos (a : latom root) (l : list (plit root)) : bool :=
+  existsb (fun p => latom_eqb (fst p) a && snd p) l.
+
+Lemma has_pos_iff : forall a l, has_pos a l = true <-> In (a, true) l.
+Proof.
+  intros a l. unfold has_pos. rewrite existsb_exists. split.
+  - intros [[b c] [Hin H]]. apply andb_true_iff in H. destruct H as [Hb Hc].
+    apply latom_eqb_true in Hb. simpl in *. subst. exact Hin.
+  - intro H. exists (a, true). split; [exact H|]. simpl.
+    rewrite andb_true_r. apply latom_eqb_true. reflexivity.
+Qed.
+
+(* A preservation clock is reset unless the cube contains its unchanged
+   marker; a restart clock is reset exactly when the cube contains its reset
+   marker. *)
+Definition comp_resets (l : list (plit root)) : list (Clock root) :=
+  filter (fun x => if is_restart x then has_pos (LRst x) l
+                   else negb (has_pos (LUnch x) l)) all_clocks.
+
+Definition act_lit (p : plit root) : list alit :=
+  match fst p with
+  | LAct q => [(q, snd p)]
+  | LNAct q => [(q, negb (snd p))]
+  | _ => []
+  end.
+
+Definition pos_atoms (l : list (plit root)) : list (latom root) := map fst (filter snd l).
+
+Definition complete_trans (t : ptransition root) : tba_transition root :=
+  {| bt_source := pt_src t;
+     bt_label := flat_map act_lit (pt_label t);
+     bt_guard := map atom_to_guard (pos_atoms (pt_label t));
+     bt_resets := comp_resets (pt_label t);
+     bt_target := pt_tgt t |}.
+
+Definition complete (A : PBuchi root) : TBA root :=
+  {| tba_nstates := pb_nstates A;
+     tba_init := pb_init A;
+     tba_transitions := map complete_trans (pb_trans A);
+     tba_accepting := pb_accepting A |}.
+
+(* Every literal over an extended atom is positive and of the right kind. *)
+Definition labels_ok (A : PBuchi root) : Prop :=
+  forall t a b, In t (pb_trans A) -> In (a, b) (pt_label t) ->
+    is_ext a = true -> b = true /\ atom_ok a.
+
+Lemma relax_labels_ok :
+  forall F A, (forall a, In a F -> atom_ok a) -> labels_ok (relax F A).
+Proof.
+  intros F A HF t a b Ht Hab Hext. simpl in Ht.
+  apply in_map_iff in Ht. destruct Ht as [t0 [<- _]].
+  simpl in Hab. apply filter_In in Hab. destruct Hab as [_ Hk].
+  unfold keep_lit in Hk. simpl in Hk. rewrite Hext in Hk. simpl in Hk.
+  apply andb_true_iff in Hk. destruct Hk as [Hb Hin].
+  split; [exact Hb|]. apply HF. apply in_atoms_iff. exact Hin.
+Qed.
+
+Lemma in_comp_resets :
+  forall l x,
+    In x (comp_resets l) <->
+    (if is_restart x then In (LRst x, true) l else ~ In (LUnch x, true) l).
+Proof.
+  intros l x. unfold comp_resets. rewrite filter_In.
   split.
-  - intros [run [Hinit [Hsteps Hbuchi]]].
-    exists run. split; [exact Hinit|]. split; [|exact Hbuchi].
-    intro i. destruct (Hsteps i) as [Hbound [t [Hin [Hsrc [Hdst Hen]]]]].
-    split; [exact Hbound|].
-    assert (Hok : markers_ok (lat_bt_label t) = true).
-    { destruct (markers_ok (lat_bt_label t)) eqn:E; [reflexivity|].
-      exfalso. destruct Hen as [Hatoms Hres].
-      exact (markers_bad Hres E Hatoms). }
-    exists (convert_transition t). split.
-    + apply in_map. apply filter_In. split; assumption.
-    + split; [exact Hsrc|]. split; [exact Hdst|].
-      apply (proj1 (latom_transition_conversion_correct rho i Hok)). exact Hen.
-  - intros [run [Hinit [Hsteps Hbuchi]]].
-    exists run. split; [exact Hinit|]. split; [|exact Hbuchi].
-    intro i. destruct (Hsteps i) as [Hbound [tt [Hin [Hsrc [Hdst Hen]]]]].
-    split; [exact Hbound|].
-    apply in_map_iff in Hin. destruct Hin as [t [<- Hin]].
-    apply filter_In in Hin. destruct Hin as [Hin Hok].
-    exists t. split; [exact Hin|]. split; [exact Hsrc|]. split; [exact Hdst|].
-    apply (proj2 (latom_transition_conversion_correct rho i Hok)). exact Hen.
+  - intros [_ H]. destruct (is_restart x).
+    + apply has_pos_iff. exact H.
+    + intro Hin. apply has_pos_iff in Hin. rewrite Hin in H. discriminate.
+  - intro H. split; [apply all_clocks_complete|]. destruct (is_restart x).
+    + apply has_pos_iff. exact H.
+    + destruct (has_pos (LUnch x) l) eqn:E; [|reflexivity].
+      exfalso. apply H. apply has_pos_iff. exact E.
 Qed.
 
+(* Soundness: a run of the completed automaton is a run of the relaxed
+   automaton on the propositional word of the same extended word. *)
+Lemma complete_trans_sound :
+  forall (rho : ext_word root) i t,
+    (forall a b, In (a, b) (pt_label t) -> is_ext a = true -> b = true /\ atom_ok a) ->
+    tba_transition_enabled rho i (complete_trans t) ->
+    Forall (plit_holds (word_of rho) i) (pt_label t).
+Proof.
+  intros rho i t Hok [Hlab [Hg Hres]].
+  unfold complete_trans, label_holds in *. simpl in *.
+  rewrite Forall_forall in Hlab, Hg. apply Forall_forall.
+  intros [a b] Hin. unfold plit_holds, word_of. simpl.
+  destruct a as [q|q|x d|x d|x d|x d|x|x].
+  - assert (H : alit_holds (tw_action (ew_base rho) i) (q, b)).
+    { apply Hlab. apply in_flat_map. exists (LAct q, b). split; [exact Hin|].
+      left. reflexivity. }
+    unfold alit_holds in H. simpl in H. destruct b; exact H.
+  - assert (H : alit_holds (tw_action (ew_base rho) i) (q, negb b)).
+    { apply Hlab. apply in_flat_map. exists (LNAct q, b). split; [exact Hin|].
+      left. reflexivity. }
+    unfold alit_holds in H. simpl in *. destruct b; simpl in H; [exact H|].
+    intro Hn. exact (Hn H).
+  - destruct (Hok _ _ Hin eq_refl) as [-> _].
+    assert (Hp : In (LCLe x d) (pos_atoms (pt_label t)))
+      by (apply in_map_iff; exists (LCLe x d, true); split;
+          [reflexivity | apply filter_In; split; [exact Hin | reflexivity]]).
+    exact (Hg _ (in_map _ _ _ Hp)).
+  - destruct (Hok _ _ Hin eq_refl) as [-> _].
+    assert (Hp : In (LCLt x d) (pos_atoms (pt_label t)))
+      by (apply in_map_iff; exists (LCLt x d, true); split;
+          [reflexivity | apply filter_In; split; [exact Hin | reflexivity]]).
+    exact (Hg _ (in_map _ _ _ Hp)).
+  - destruct (Hok _ _ Hin eq_refl) as [-> _].
+    assert (Hp : In (LCGe x d) (pos_atoms (pt_label t)))
+      by (apply in_map_iff; exists (LCGe x d, true); split;
+          [reflexivity | apply filter_In; split; [exact Hin | reflexivity]]).
+    exact (Hg _ (in_map _ _ _ Hp)).
+  - destruct (Hok _ _ Hin eq_refl) as [-> _].
+    assert (Hp : In (LCGt x d) (pos_atoms (pt_label t)))
+      by (apply in_map_iff; exists (LCGt x d, true); split;
+          [reflexivity | apply filter_In; split; [exact Hin | reflexivity]]).
+    exact (Hg _ (in_map _ _ _ Hp)).
+  - destruct (Hok _ _ Hin eq_refl) as [-> Hk]. simpl in Hk.
+    unfold rst_at. apply (proj2 (Hres x)). apply in_comp_resets.
+    rewrite Hk. exact Hin.
+  - destruct (Hok _ _ Hin eq_refl) as [-> Hk]. simpl in Hk.
+    unfold unch_at. apply Bool.not_true_iff_false. intro E.
+    apply (proj1 (Hres x)) in E. apply in_comp_resets in E.
+    rewrite Hk in E. contradiction.
+Qed.
+
+Lemma complete_sound :
+  forall A (rho : ext_word root),
+    labels_ok A -> TBA_ext_accepts (complete A) rho -> PBA_accepts A (word_of rho).
+Proof.
+  intros A rho Hok [run [Hinit [Hsteps Hacc]]].
+  exists run. split; [exact Hinit|]. split; [|exact Hacc].
+  intro i. destruct (Hsteps i) as [Hb [tt [Ht [Hs [Hd Hen]]]]].
+  split; [exact Hb|]. simpl in Ht. apply in_map_iff in Ht. destruct Ht as [t [<- Ht]].
+  exists t. split; [exact Ht|]. split; [exact Hs|]. split; [exact Hd|].
+  apply (complete_trans_sound (rho := rho) (i := i)); [|exact Hen].
+  intros a b Hab Hext. exact (Hok t a b Ht Hab Hext).
+Qed.
+
+(* Clock values determined by an initial valuation and reset decisions. *)
+Fixpoint vals (v0 : Clock root -> R) (r : nat -> Clock root -> bool)
+         (w : timed_word) (i : nat) (x : Clock root) : R :=
+  match i with
+  | O => v0 x
+  | S j => if r j x then delta w j else vals v0 r w j x + delta w j
+  end.
+
+Lemma vals_nonneg :
+  forall v0 r w, (forall x, 0 <= v0 x) -> forall i x, 0 <= vals v0 r w i x.
+Proof.
+  intros v0 r w H0 i x. induction i as [|j IH]; simpl; [apply H0|].
+  pose proof (delta_positive w j). destruct (r j x); lra.
+Qed.
+
+(* Completeness (Lemma IV.1 of the paper): along a run of the relaxed
+   automaton on the propositional word of a clock-consistent extended word
+   [rho], the extended word [rho'] with the same timed word and initial
+   values, and with the resets of the completion, is accepted by the
+   completed automaton.  Preservation clocks of [rho'] are reset wherever
+   those of [rho] are, so their values are smaller and their upper bounds
+   still hold; restart clocks of [rho'] are reset only where those of [rho]
+   are, so their values are larger and their lower bounds still hold. *)
+Lemma complete_complete :
+  forall A (rho : ext_word root),
+    clock_consistent rho -> labels_ok A -> PBA_accepts A (word_of rho) ->
+    exists rho' : ext_word root,
+      ew_base rho' = ew_base rho /\ clock_consistent rho' /\
+      TBA_ext_accepts (complete A) rho'.
+Proof.
+  intros A rho [Hnn Hcc] Hok [run [Hinit [Hsteps Hacc]]].
+  set (P := fun i (t : ptransition root) =>
+              pt_src t = run i /\ pt_tgt t = run (S i) /\
+              Forall (plit_holds (word_of rho) i) (pt_label t)).
+  assert (Hex : forall i, exists t, In t (pb_trans A) /\ P i t).
+  { intro i. destruct (Hsteps i) as [_ [t [Ht H]]]. exists t. split; assumption. }
+  set (lab := fun i => match first_such (P i) (pb_trans A) with
+                       | Some t => pt_label t | None => [] end).
+  assert (Hlab : forall i, exists t, first_such (P i) (pb_trans A) = Some t /\
+                   In t (pb_trans A) /\ P i t /\ lab i = pt_label t).
+  { intro i. destruct (first_such_spec (Hex i)) as [t [Hf [Ht HP]]].
+    exists t. split; [exact Hf|]. split; [exact Ht|]. split; [exact HP|].
+    unfold lab. rewrite Hf. reflexivity. }
+  set (r := fun i x => if In_dec (@clock_eq_dec root) x (comp_resets (lab i))
+                       then true else false).
+  set (rho' := {| ew_base := ew_base rho;
+                  ew_val := vals (ew_val rho 0) r (ew_base rho);
+                  ew_reset := r |}).
+  assert (Hr : forall i x, r i x = true <-> In x (comp_resets (lab i))).
+  { intros i x. unfold r. destruct (In_dec _ x _); split; intro H;
+      try reflexivity; try assumption; try discriminate; contradiction. }
+  (* the literals of the chosen cube hold on rho *)
+  assert (Hsat : forall i a b, In (a, b) (lab i) -> plit_holds (word_of rho) i (a, b)).
+  { intros i a b Hin. destruct (Hlab i) as [t [_ [_ [[_ [_ Hl]] Heq]]]].
+    rewrite Heq in Hin. rewrite Forall_forall in Hl. exact (Hl _ Hin). }
+  assert (Hok' : forall i a b, In (a, b) (lab i) -> is_ext a = true ->
+                   b = true /\ atom_ok a).
+  { intros i a b Hin Hext. destruct (Hlab i) as [t [_ [Ht [_ Heq]]]].
+    rewrite Heq in Hin. exact (Hok t a b Ht Hin Hext). }
+  (* preservation clocks: smaller values *)
+  assert (Hpres : forall x, is_restart x = false ->
+                    forall i, vals (ew_val rho 0) r (ew_base rho) i x <= ew_val rho i x).
+  { intros x Hx i. induction i as [|j IH]; simpl; [lra|].
+    rewrite (Hcc j x). pose proof (delta_positive (ew_base rho) j).
+    pose proof (Hnn j x).
+    destruct (r j x) eqn:Erj.
+    - destruct (ew_reset rho j x); lra.
+    - destruct (ew_reset rho j x) eqn:E; [|lra].
+      exfalso. assert (Hin : In x (comp_resets (lab j))).
+      { apply in_comp_resets. rewrite Hx. intro HU.
+        pose proof (Hsat _ _ _ HU) as HU'. unfold plit_holds, word_of in HU'.
+        simpl in HU'. unfold unch_at in HU'. congruence. }
+      apply Hr in Hin. congruence. }
+  (* restart clocks: larger values *)
+  assert (Hrest : forall x, is_restart x = true ->
+                    forall i, ew_val rho i x <= vals (ew_val rho 0) r (ew_base rho) i x).
+  { intros x Hx i. induction i as [|j IH]; simpl; [lra|].
+    rewrite (Hcc j x). pose proof (delta_positive (ew_base rho) j).
+    pose proof (@vals_nonneg (ew_val rho 0) r (ew_base rho) (Hnn 0%nat) j x).
+    destruct (r j x) eqn:Erj.
+    - apply Hr in Erj. apply in_comp_resets in Erj. rewrite Hx in Erj.
+      pose proof (Hsat _ _ _ Erj) as HR. unfold plit_holds, word_of in HR.
+      simpl in HR. unfold rst_at in HR. rewrite HR. lra.
+    - destruct (ew_reset rho j x); lra. }
+  exists rho'. split; [reflexivity|]. split.
+  - split.
+    + intros i x. apply vals_nonneg. apply Hnn.
+    + intros i x. reflexivity.
+  - exists run. split; [exact Hinit|]. split; [|exact Hacc].
+    intro i. split; [exact (proj1 (Hsteps i))|].
+    destruct (Hlab i) as [t [_ [Ht [[Hs [Hd Hl]] Heq]]]].
+    exists (complete_trans t). split; [simpl; apply in_map; exact Ht|].
+    split; [exact Hs|]. split; [exact Hd|].
+    rewrite Forall_forall in Hl.
+    split; [|split].
+    + (* actions *)
+      unfold label_holds. simpl. apply Forall_forall. intros [q c] Hq.
+      apply in_flat_map in Hq. destruct Hq as [[a b] [Hab Hq]].
+      pose proof (Hl _ Hab) as H. unfold plit_holds, word_of in H. simpl in H.
+      unfold act_lit in Hq. simpl in Hq.
+      destruct a as [q0|q0|x d|x d|x d|x d|x|x]; simpl in Hq; try contradiction.
+      * destruct Hq as [Hq|[]]. injection Hq as <- <-.
+        unfold alit_holds. simpl. destruct b; exact H.
+      * destruct Hq as [Hq|[]]. injection Hq as <- <-.
+        unfold alit_holds. simpl. destruct b; simpl in *; [exact H|].
+        destruct (Nat.eq_dec (tw_action (ew_base rho) i) q0) as [E|E];
+          [exact E | contradiction].
+    + (* guards *)
+      apply Forall_forall. intros o Ho. simpl in Ho.
+      apply in_map_iff in Ho. destruct Ho as [a [<- Ha]].
+      unfold pos_atoms in Ha. apply in_map_iff in Ha.
+      destruct Ha as [[a' b] [Ea Ha]]. simpl in Ea. subst a'.
+      apply filter_In in Ha. destruct Ha as [Ha Hb]. simpl in Hb. subst b.
+      pose proof (Hl _ Ha) as H. unfold plit_holds, word_of in H. simpl in H.
+      assert (Hin' : In (a, true) (lab i)) by (rewrite Heq; exact Ha).
+      destruct a as [q|q|x d|x d|x d|x d|x|x]; simpl; try exact I;
+        pose proof (proj2 (Hok' i _ _ Hin' eq_refl)) as Hk; simpl in Hk;
+        simpl in H; unfold c_le, c_lt, c_ge, c_gt in H.
+      * pose proof (Hpres x Hk i). unfold clock_constraint_holds, rho'. simpl. lra.
+      * pose proof (Hpres x Hk i). unfold clock_constraint_holds, rho'. simpl. lra.
+      * pose proof (Hrest x Hk i). unfold clock_constraint_holds, rho'. simpl. lra.
+      * pose proof (Hrest x Hk i). unfold clock_constraint_holds, rho'. simpl. lra.
+    + (* resets *)
+      intro x. simpl. rewrite Hr, Heq. reflexivity.
+Qed.
+
+End Completion.
+
 (* ====================================================================== *)
-(* 9c. The ONE external axiom: LTL -> Buchi correctness                   *)
+(* 9h. The ONE external axiom: LTL -> Buchi correctness                   *)
 (* ====================================================================== *)
 
-(* The external LTL-to-Buchi tool returns an ordinary Buchi automaton over
-   LATom-labelled transitions.  Its clocks are those of [Clock root], a
-   finite type, so the contract is satisfiable: transitions labelled by
-   complete cubes over the atoms of [f], with one reset or unchanged marker
-   per clock of [root], realize it. *)
+(* The external LTL-to-Buchi tool (Spot) treats the atoms of the extended
+   alphabet as independent propositions: it returns a Buchi automaton whose
+   transitions are labelled by cubes of literals and which accepts exactly
+   the propositional words satisfying the formula. *)
 Axiom LTL_TO_BUCHI_CORRECT :
   forall (root : mtl) (f : ltl root),
-    { A : Buchi root |
-      forall rho : ext_word root,
-        BA_accepts A rho <-> lsat rho 0 f }.
+    { A : PBuchi root |
+      forall s : pword root, PBA_accepts A s <-> psat s 0 f }.
 
-Definition ltl_to_buchi (root : mtl) (f : ltl root) : Buchi root :=
+Definition ltl_to_buchi (root : mtl) (f : ltl root) : PBuchi root :=
   proj1_sig (LTL_TO_BUCHI_CORRECT f).
 
 Theorem ltl_to_buchi_correct :
-  forall root (f : ltl root) (rho : ext_word root),
-    BA_accepts (ltl_to_buchi f) rho <-> lsat rho 0 f.
+  forall root (f : ltl root) (s : pword root),
+    PBA_accepts (ltl_to_buchi f) s <-> psat s 0 f.
 Proof.
-  intros root f rho.
-  unfold ltl_to_buchi.
-  destruct (LTL_TO_BUCHI_CORRECT f) as [A HA].
-  simpl.
-  apply HA.
+  intros root f s. unfold ltl_to_buchi.
+  destruct (LTL_TO_BUCHI_CORRECT f) as [A HA]. simpl. apply HA.
 Qed.
 
 (* ====================================================================== *)
@@ -1443,10 +1875,51 @@ Definition EncodingCorrect :=
 (* 12. End-to-end composition                                             *)
 (* ====================================================================== *)
 
-(* The compiled TBA has type [TBA f]: its clocks are the elements of
-   [Clock f], i.e. exactly the timed subformulas of [f]. *)
-Definition compile (f : mtl) : TBA f :=
-  convert_buchi_to_tba (ltl_to_buchi (T f)).
+(* The compiled TBA for a Buchi automaton [A] of [T f] produced by any
+   LTL-to-Buchi translator: [A] relaxed and completed.  It has type [TBA f]:
+   its clocks are the timed subformulas of [f]. *)
+Definition compile_with (f : mtl) (A : PBuchi f) : TBA f :=
+  complete (relax (ltl_atoms (T f)) A).
+
+Lemma compile_labels_ok :
+  forall f (A : PBuchi f), labels_ok (relax (ltl_atoms (T f)) A).
+Proof.
+  intros f A. apply relax_labels_ok. intros a Ha. unfold T in Ha.
+  exact (T_at_atoms_ok Ha).
+Qed.
+
+Theorem compile_with_correct_from_encoding :
+  forall (f : mtl) (A : PBuchi f) (w : timed_word),
+    EncodingCorrect ->
+    (forall s : pword f, PBA_accepts A s <-> psat s 0 (T f)) ->
+    well_formed f ->
+    (msat w 0 f <-> TBA_accepts (compile_with A) w).
+Proof.
+  intros f A w Henc HA Hwf.
+  specialize (Henc f w Hwf).
+  unfold compile_with, TBA_accepts.
+  split.
+  - intro Hm.
+    apply (proj1 Henc) in Hm.
+    destruct Hm as [rho [Hbase [Hclock Hltl]]].
+    apply lsat_psat in Hltl.
+    apply (proj2 (HA (word_of rho))) in Hltl.
+    apply (relax_complete (ltl_atoms (T f))) in Hltl.
+    destruct (complete_complete Hclock (@compile_labels_ok f A) Hltl)
+      as [rho' [Hb' [Hc' Ha']]].
+    exists rho'. split; [unfold same_base in *; rewrite Hb'; exact Hbase|].
+    split; [exact Hc' | exact Ha'].
+  - intros [rho [Hbase [Hclock Htba]]].
+    apply (proj2 Henc).
+    exists rho. split; [exact Hbase|]. split; [exact Hclock|].
+    apply lsat_psat.
+    apply (relax_sound (A := A)).
+    + intros s' Hs'. apply HA. exact Hs'.
+    + exact (complete_sound (@compile_labels_ok f A) Htba).
+Qed.
+
+(* The compiled TBA, with the axiomatized back-end. *)
+Definition compile (f : mtl) : TBA f := compile_with (ltl_to_buchi (T f)).
 
 Theorem MTL_to_TBA_correct_from_encoding :
   forall (f : mtl) (w : timed_word),
@@ -1454,27 +1927,9 @@ Theorem MTL_to_TBA_correct_from_encoding :
     well_formed f ->
     (msat w 0 f <-> TBA_accepts (compile f) w).
 Proof.
-  intros f w Henc Hwf.
-  specialize (Henc f w Hwf).
-  unfold compile, TBA_accepts.
-  split.
-  - intro Hm.
-    apply (proj1 Henc) in Hm.
-    destruct Hm as [rho [Hbase [Hclock Hltl]]].
-    exists rho.
-    split; [exact Hbase|].
-    split; [exact Hclock|].
-    apply (proj1 (convert_buchi_to_tba_correct (ltl_to_buchi (T f)) rho)).
-    apply (proj2 (ltl_to_buchi_correct (T f) rho)).
-    exact Hltl.
-  - intros [rho [Hbase [Hclock Htba]]].
-    apply (proj2 Henc).
-    exists rho.
-    split; [exact Hbase|].
-    split; [exact Hclock|].
-    apply (proj1 (ltl_to_buchi_correct (T f) rho)).
-    apply (proj2 (convert_buchi_to_tba_correct (ltl_to_buchi (T f)) rho)).
-    exact Htba.
+  intros f w Henc Hwf. unfold compile.
+  apply compile_with_correct_from_encoding; [exact Henc | | exact Hwf].
+  intro s. apply ltl_to_buchi_correct.
 Qed.
 
 (* ====================================================================== *)

@@ -1,0 +1,12 @@
+; mtl2tba: parser of the prototype + code extracted from Coq (optim.ml)
+(executable
+ (name mtl2tba)
+ (ocamlopt_flags (:standard -w -a))
+ (flags (:standard -w -a))
+ (libraries unix)
+ (modules mtl mtl2mtl parser lexer optim lbtt_read output mtl2tba))
+
+(menhir
+ (modules parser))
+
+(ocamllex lexer)

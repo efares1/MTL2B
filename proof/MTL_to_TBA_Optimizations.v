@@ -303,8 +303,9 @@ Definition lower_clocks (o : option (clock_constraint root)) : list (Clock root)
 
 (* Candidate clocks of the entry bounds of [l]. *)
 Definition entry_clocks (A : TBA root) (l : nat) : list (Clock root) :=
-  flat_map (fun t => bt_resets t ++ flat_map lower_clocks (bt_guard t))
-           (incoming A l).
+  nodup (@clock_eq_dec root)
+    (flat_map (fun t => bt_resets t ++ flat_map lower_clocks (bt_guard t))
+              (incoming A l)).
 
 Definition entry_guard (A : TBA root) (l : nat) : guard root :=
   map (fun x =>
@@ -669,6 +670,59 @@ Proof.
   - intros rho _. apply remove_unreachable_complete.
 Qed.
 
+(* Removal of the transitions whose action label is unsatisfiable: a label
+   requiring two different actions, or an action and its negation, is never
+   satisfied by the single action of a position.  Such labels arise because
+   the LTL-to-Buchi back-end treats the atoms a and !a as independent
+   propositions. *)
+Definition label_sat (l : list alit) : bool :=
+  match find (fun p : alit => snd p) l with
+  | Some (a, _) =>
+      forallb (fun p : alit => if snd p then Nat.eqb (fst p) a
+                               else negb (Nat.eqb (fst p) a)) l
+  | None => true
+  end.
+
+Lemma label_sat_holds :
+  forall l le, label_holds l le -> label_sat l = true.
+Proof.
+  intros l le H. unfold label_holds in H. rewrite Forall_forall in H.
+  unfold label_sat. destruct (find (fun p : alit => snd p) l) as [[a b]|] eqn:E;
+    [|reflexivity].
+  apply find_some in E. destruct E as [Hin Hb]. simpl in Hb. subst b.
+  pose proof (H _ Hin) as Ha. unfold alit_holds in Ha. simpl in Ha.
+  apply forallb_forall. intros [c b] Hc. pose proof (H _ Hc) as Hp.
+  unfold alit_holds in Hp. simpl in *. rewrite Ha in Hp.
+  destruct b.
+  - subst c. apply Nat.eqb_refl.
+  - apply negb_true_iff. apply Nat.eqb_neq. intro E. apply Hp. symmetry. exact E.
+Qed.
+
+Definition remove_unsat (A : TBA root) : TBA root :=
+  with_transitions A (filter (fun t => label_sat (bt_label t)) (tba_transitions A)).
+
+Lemma remove_unsat_complete :
+  forall A (rho : ext_word root),
+    TBA_ext_accepts A rho -> TBA_ext_accepts (remove_unsat A) rho.
+Proof.
+  intros A rho [run [Hinit [Hsteps Hbuchi]]].
+  apply with_transitions_complete with (run := run); try assumption.
+  intro i.
+  destruct (Hsteps i) as [Hbound [t [Hin [Hsrc [Hdst Hen]]]]].
+  split; [exact Hbound|].
+  exists t. split; [|split; [exact Hsrc|]; split; [exact Hdst | exact Hen]].
+  apply filter_In. split; [exact Hin|].
+  destruct Hen as [Hlab _]. exact (label_sat_holds Hlab).
+Qed.
+
+Theorem remove_unsat_accepts :
+  forall A w, TBA_accepts A w <-> TBA_accepts (remove_unsat A) w.
+Proof.
+  intros A. apply accepts_of_ext.
+  - intro rho. apply filter_sound.
+  - intros rho _. apply remove_unsat_complete.
+Qed.
+
 (* ====================================================================== *)
 (* 6. Merging of synchronously reset clocks                               *)
 (* ====================================================================== *)
@@ -935,7 +989,7 @@ Fixpoint merge_pairs (ps : list (Clock root * Clock root)) (A : TBA root)
   end.
 
 Definition reset_clocks (A : TBA root) : list (Clock root) :=
-  flat_map (fun t => bt_resets t) (tba_transitions A).
+  nodup (@clock_eq_dec root) (flat_map (fun t => bt_resets t) (tba_transitions A)).
 
 Definition merge_all (A : TBA root) : TBA root :=
   merge_pairs (list_prod (reset_clocks A) (reset_clocks A)) A.
@@ -964,16 +1018,22 @@ Definition tests (x : Clock root) (t : tba_transition root) : bool :=
 (* Locations from which a transition testing [x] may still be taken:
    backward closure of the sources of the transitions testing [x]. *)
 Definition live_step (A : TBA root) (x : Clock root) (L : list nat) : list nat :=
-  L ++ map (fun t => bt_source t)
-           (filter (fun t => tests x t ||
-                             existsb (Nat.eqb (bt_target t)) L)
-                   (tba_transitions A)).
+  nodup Nat.eq_dec
+    (L ++ map (fun t => bt_source t)
+              (filter (fun t => tests x t ||
+                                existsb (Nat.eqb (bt_target t)) L)
+                      (tba_transitions A))).
 
+(* The iteration stops as soon as the list does not grow.  (The correctness
+   of the pass does not depend on how [live] is computed: the properties it
+   needs are checked by [dead_ok].) *)
 Fixpoint live_iter (n : nat) (A : TBA root) (x : Clock root) (L : list nat)
     : list nat :=
   match n with
   | O => L
-  | S n' => live_iter n' A x (live_step A x L)
+  | S n' =>
+      let L' := live_step A x L in
+      if Nat.eqb (length L') (length L) then L' else live_iter n' A x L'
   end.
 
 Definition live (A : TBA root) (x : Clock root) : list nat :=
@@ -1307,11 +1367,27 @@ Proof.
 Qed.
 
 (* All reset clocks are processed in turn. *)
+(* The same pass, computing the live locations once. *)
+Definition remove_dead_resets_clock_fast (x : Clock root) (A : TBA root) : TBA root :=
+  let L := live A x in
+  let dead_in := fun l => negb (existsb (Nat.eqb l) L) in
+  if forallb (fun t => negb (dead_in (bt_source t)) ||
+                       (dead_in (bt_target t) && negb (tests x t)))
+             (tba_transitions A)
+  then with_transitions A
+         (map (fun t => if dead_in (bt_target t) then drop_reset x t else t)
+              (tba_transitions A))
+  else A.
+
+Lemma remove_dead_resets_clock_fast_eq :
+  forall x A, remove_dead_resets_clock_fast x A = remove_dead_resets_clock x A.
+Proof. intros x A. reflexivity. Qed.
+
 Fixpoint remove_dead_resets_list (xs : list (Clock root)) (A : TBA root)
     : TBA root :=
   match xs with
   | [] => A
-  | x :: xs' => remove_dead_resets_list xs' (remove_dead_resets_clock x A)
+  | x :: xs' => remove_dead_resets_list xs' (remove_dead_resets_clock_fast x A)
   end.
 
 Definition remove_dead_resets (A : TBA root) : TBA root :=
@@ -1323,6 +1399,7 @@ Proof.
   intros A w. unfold remove_dead_resets.
   generalize (reset_clocks A) as xs. intro xs.
   revert A. induction xs as [|x xs IH]; intro A; simpl; [reflexivity|].
+  rewrite remove_dead_resets_clock_fast_eq.
   rewrite (remove_dead_resets_clock_accepts x A w). apply IH.
 Qed.
 
@@ -1439,6 +1516,731 @@ Proof.
 Qed.
 
 (* ====================================================================== *)
+(* 6d. Merging of equivalent states and of transitions                    *)
+(* ====================================================================== *)
+
+(* ---------------------------------------------------------------------- *)
+(* Decidable equality of the components of transitions                    *)
+
+Definition alit_dec : forall a b : alit, {a = b} + {a <> b}.
+Proof. decide equality; [apply Bool.bool_dec | apply Nat.eq_dec]. Defined.
+
+Definition cmp_dec : forall a b : clock_comparison, {a = b} + {a <> b}.
+Proof. decide equality. Defined.
+
+Definition cc_dec : forall a b : clock_constraint root, {a = b} + {a <> b}.
+Proof.
+  decide equality; first [apply Req_EM_T | apply cmp_dec | apply (@clock_eq_dec root)].
+Defined.
+
+Definition item_dec : forall a b : option (clock_constraint root), {a = b} + {a <> b}.
+Proof. decide equality. apply cc_dec. Defined.
+
+Definition tr_dec : forall a b : tba_transition root, {a = b} + {a <> b}.
+Proof.
+  decide equality;
+    first [apply Nat.eq_dec | apply (list_eq_dec alit_dec)
+          | apply (list_eq_dec item_dec) | apply (list_eq_dec (@clock_eq_dec root))].
+Defined.
+
+Definition beq {A : Type} (d : forall a b : A, {a = b} + {a <> b}) (a b : A) : bool :=
+  if d a b then true else false.
+
+Lemma beq_true :
+  forall (A : Type) (d : forall a b : A, {a = b} + {a <> b}) a b,
+    beq d a b = true <-> a = b.
+Proof. intros A d a b. unfold beq. destruct (d a b); split; intro H; congruence. Qed.
+
+Definition set_incl {A : Type} (d : forall a b : A, {a = b} + {a <> b}) (l1 l2 : list A)
+    : bool :=
+  forallb (fun a => existsb (beq d a) l2) l1.
+
+Lemma set_incl_true :
+  forall (A : Type) (d : forall a b : A, {a = b} + {a <> b}) l1 l2,
+    set_incl d l1 l2 = true -> incl l1 l2.
+Proof.
+  intros A d l1 l2 H a Ha. unfold set_incl in H. rewrite forallb_forall in H.
+  pose proof (H a Ha) as Hx. apply existsb_exists in Hx. destruct Hx as [b [Hb E]].
+  apply beq_true in E. subst b. exact Hb.
+Qed.
+
+Definition set_eqb {A : Type} (d : forall a b : A, {a = b} + {a <> b}) (l1 l2 : list A)
+    : bool :=
+  set_incl d l1 l2 && set_incl d l2 l1.
+
+Lemma label_incl :
+  forall (l1 l2 : list alit) le, incl l2 l1 -> label_holds l1 le -> label_holds l2 le.
+Proof.
+  intros l1 l2 le Hi H. unfold label_holds in *. rewrite Forall_forall in *.
+  intros a Ha. apply H. apply Hi. exact Ha.
+Qed.
+
+Lemma guard_incl :
+  forall (rho : ext_word root) i (g1 g2 : guard root),
+    incl g2 g1 -> Forall (guard_item_holds rho i) g1 -> Forall (guard_item_holds rho i) g2.
+Proof.
+  intros rho i g1 g2 Hi H. rewrite Forall_forall in *.
+  intros a Ha. apply H. apply Hi. exact Ha.
+Qed.
+
+(* Enabledness depends only on the label, the guard, and the resets. *)
+Lemma enabled_ext :
+  forall (rho : ext_word root) i (t t' : tba_transition root),
+    bt_label t = bt_label t' -> bt_guard t = bt_guard t' -> bt_resets t = bt_resets t' ->
+    tba_transition_enabled rho i t -> tba_transition_enabled rho i t'.
+Proof.
+  intros rho i t t' El Eg Er [H1 [H2 H3]]. unfold tba_transition_enabled.
+  rewrite <- El, <- Eg, <- Er. split; [exact H1|]. split; assumption.
+Qed.
+
+(* ---------------------------------------------------------------------- *)
+(* Merging of equivalent states                                           *)
+
+(* [q] is merged into [p]: transitions entering [q] are redirected to [p],
+   and the transitions leaving [q] are removed.  This is allowed when [p] and
+   [q] have the same acceptance status and the same outgoing transitions,
+   targets being compared after the redirection. *)
+Definition red (p q s : nat) : nat := if Nat.eqb s q then p else s.
+
+Lemma red_q : forall p q, red p q q = p.
+Proof. intros p q. unfold red. rewrite Nat.eqb_refl. reflexivity. Qed.
+
+Lemma red_other : forall p q s, s <> q -> red p q s = s.
+Proof. intros p q s H. unfold red. apply Nat.eqb_neq in H. rewrite H. reflexivity. Qed.
+
+Lemma red_neq : forall p q s, p <> q -> red p q s <> q.
+Proof.
+  intros p q s Hpq. unfold red. destruct (Nat.eqb s q) eqn:E; [exact Hpq|].
+  apply Nat.eqb_neq. exact E.
+Qed.
+
+Definition redirect (p q : nat) (t : tba_transition root) : tba_transition root :=
+  {| bt_source := bt_source t; bt_label := bt_label t; bt_guard := bt_guard t;
+     bt_resets := bt_resets t; bt_target := red p q (bt_target t) |}.
+
+(* Labels, guards, and resets are compared as sets. *)
+Definition sim (p q : nat) (t t' : tba_transition root) : bool :=
+  set_eqb alit_dec (bt_label t) (bt_label t') &&
+  set_eqb item_dec (bt_guard t) (bt_guard t') &&
+  set_eqb (@clock_eq_dec root) (bt_resets t) (bt_resets t') &&
+  Nat.eqb (red p q (bt_target t)) (red p q (bt_target t')).
+
+(* A transition with fewer constraints and the same resets is enabled
+   whenever the first one is. *)
+Lemma enabled_set :
+  forall (rho : ext_word root) i (t t' : tba_transition root),
+    incl (bt_label t') (bt_label t) -> incl (bt_guard t') (bt_guard t) ->
+    (forall x, In x (bt_resets t) <-> In x (bt_resets t')) ->
+    tba_transition_enabled rho i t -> tba_transition_enabled rho i t'.
+Proof.
+  intros rho i t t' Hl Hg Hr [H1 [H2 H3]]. unfold tba_transition_enabled.
+  split; [exact (label_incl Hl H1)|]. split; [exact (guard_incl Hg H2)|].
+  intro x. rewrite (H3 x). apply Hr.
+Qed.
+
+Lemma sim_spec :
+  forall p q t t', sim p q t t' = true ->
+    (forall (rho : ext_word root) i,
+       tba_transition_enabled rho i t -> tba_transition_enabled rho i t') /\
+    (forall (rho : ext_word root) i,
+       tba_transition_enabled rho i t' -> tba_transition_enabled rho i t) /\
+    red p q (bt_target t) = red p q (bt_target t').
+Proof.
+  intros p q t t' H. unfold sim, set_eqb in H.
+  repeat rewrite andb_true_iff in H.
+  destruct H as [[[[L1 L2] [G1 G2]] [R1 R2]] H4].
+  apply set_incl_true in L1. apply set_incl_true in L2.
+  apply set_incl_true in G1. apply set_incl_true in G2.
+  apply set_incl_true in R1. apply set_incl_true in R2.
+  apply Nat.eqb_eq in H4.
+  split; [|split; [|exact H4]]; intros rho i; apply enabled_set; auto;
+    intro x; split; intro Hx; auto.
+Qed.
+
+(* Every transition leaving [s] has a similar transition leaving [s']. *)
+Definition covers (A : TBA root) (p q s s' : nat) : bool :=
+  forallb (fun t => negb (Nat.eqb (bt_source t) s) ||
+                    existsb (fun t' => Nat.eqb (bt_source t') s' && sim p q t t')
+                            (tba_transitions A))
+          (tba_transitions A).
+
+Lemma covers_spec :
+  forall A p q s s', covers A p q s s' = true ->
+    forall t, In t (tba_transitions A) -> bt_source t = s ->
+      exists t', In t' (tba_transitions A) /\ bt_source t' = s' /\ sim p q t t' = true.
+Proof.
+  intros A p q s s' H t Ht Hs. unfold covers in H. rewrite forallb_forall in H.
+  specialize (H t Ht). rewrite Hs, Nat.eqb_refl in H. simpl in H.
+  apply existsb_exists in H. destruct H as [t' [Ht' E]].
+  apply andb_true_iff in E. destruct E as [E1 E2]. apply Nat.eqb_eq in E1.
+  exists t'. tauto.
+Qed.
+
+Definition in_nat (n : nat) (l : list nat) : bool := existsb (Nat.eqb n) l.
+
+Lemma in_nat_iff : forall n l, in_nat n l = true <-> In n l.
+Proof.
+  intros n l. unfold in_nat. rewrite existsb_exists. split.
+  - intros [m [Hm E]]. apply Nat.eqb_eq in E. subst m. exact Hm.
+  - intro H. exists n. split; [exact H | apply Nat.eqb_refl].
+Qed.
+
+Definition states_mergeable (A : TBA root) (p q : nat) : bool :=
+  negb (Nat.eqb p q) && Nat.ltb p (tba_nstates A) && Nat.ltb q (tba_nstates A) &&
+  Bool.eqb (in_nat p (tba_accepting A)) (in_nat q (tba_accepting A)) &&
+  covers A p q q p && covers A p q p q.
+
+Definition merge_states (p q : nat) (A : TBA root) : TBA root :=
+  {| tba_nstates := tba_nstates A;
+     tba_init := red p q (tba_init A);
+     tba_transitions := map (redirect p q)
+                          (filter (fun t => negb (Nat.eqb (bt_source t) q))
+                                  (tba_transitions A));
+     tba_accepting := tba_accepting A |}.
+
+(* A run defined step by step from a choice of the next state. *)
+Fixpoint build_run (step : nat -> nat -> option nat) (s0 : nat) (i : nat) : nat :=
+  match i with
+  | O => s0
+  | S j => match step j (build_run step s0 j) with Some s => s | None => s0 end
+  end.
+
+Lemma merge_states_ext :
+  forall A p q, states_mergeable A p q = true ->
+    forall rho : ext_word root,
+      TBA_ext_accepts A rho <-> TBA_ext_accepts (merge_states p q A) rho.
+Proof.
+  intros A p q Hm rho. unfold states_mergeable in Hm.
+  repeat rewrite andb_true_iff in Hm.
+  destruct Hm as [[[[[Hpq Hp] Hq] Hacc] Hqp] Hpq'].
+  apply negb_true_iff, Nat.eqb_neq in Hpq.
+  apply Nat.ltb_lt in Hp. apply Nat.ltb_lt in Hq.
+  apply Bool.eqb_prop in Hacc.
+  assert (Hacc' : In p (tba_accepting A) <-> In q (tba_accepting A)).
+  { rewrite <- !in_nat_iff, Hacc. tauto. }
+  assert (Hbound : forall s, (s < tba_nstates A)%nat -> (red p q s < tba_nstates A)%nat).
+  { intros s Hs. unfold red. destruct (Nat.eqb s q); assumption. }
+  split.
+  - (* A -> merged: replace q by p along the run *)
+    intros [run [Hinit [Hsteps Hbuchi]]].
+    exists (fun i => red p q (run i)). simpl.
+    split; [rewrite Hinit; reflexivity|]. split.
+    + intro i. destruct (Hsteps i) as [Hb [t [Ht [Hs [Hd Hen]]]]].
+      split; [exact (Hbound _ Hb)|].
+      destruct (Nat.eq_dec (run i) q) as [Eq|Nq].
+      * destruct (covers_spec Hqp Ht (eq_trans Hs Eq)) as [t' [Ht' [Hs' Hsim]]].
+        destruct (sim_spec Hsim) as [Hen1 [_ Et]].
+        exists (redirect p q t'). split.
+        -- apply in_map. apply filter_In. split; [exact Ht'|].
+           rewrite Hs'. apply negb_true_iff, Nat.eqb_neq. exact Hpq.
+        -- simpl. split; [rewrite Eq, red_q; exact Hs'|].
+           split; [rewrite <- Et, Hd; reflexivity|].
+           exact (enabled_ext (t := t') (t' := redirect p q t') eq_refl eq_refl eq_refl
+                                (Hen1 rho i Hen)).
+      * exists (redirect p q t). split.
+        -- apply in_map. apply filter_In. split; [exact Ht|].
+           rewrite Hs. apply negb_true_iff, Nat.eqb_neq. exact Nq.
+        -- simpl. split; [rewrite Hs, red_other; [reflexivity | exact Nq]|].
+           split; [rewrite Hd; reflexivity|].
+           exact (enabled_ext (t' := redirect p q t) eq_refl eq_refl eq_refl Hen).
+    + intro n. destruct (Hbuchi n) as [j [Hj Ha]]. exists j. split; [exact Hj|].
+      unfold red. destruct (Nat.eqb (run j) q) eqn:E; [|exact Ha].
+      apply Nat.eqb_eq in E. rewrite E in Ha. apply Hacc'. exact Ha.
+  - (* merged -> A: follow the run, choosing in q the twin of a transition of p *)
+    intros [run' [Hinit' [Hsteps' Hbuchi']]].
+    simpl in Hinit', Hsteps', Hbuchi'.
+    (* a step of the merged run comes from a transition of A not leaving q *)
+    assert (Hstep : forall i, exists t, In t (tba_transitions A) /\ bt_source t <> q /\
+                      bt_source t = run' i /\ red p q (bt_target t) = run' (S i) /\
+                      tba_transition_enabled rho i t).
+    { intro i. destruct (Hsteps' i) as [_ [tt [Htt [Hs [Hd Hen]]]]].
+      apply in_map_iff in Htt. destruct Htt as [t [<- Ht]].
+      apply filter_In in Ht. destruct Ht as [Ht Hnq].
+      apply negb_true_iff, Nat.eqb_neq in Hnq.
+      exists t. split; [exact Ht|]. split; [exact Hnq|]. simpl in *.
+      split; [exact Hs|]. split; [exact Hd|].
+      exact (enabled_ext (t := redirect p q t) eq_refl eq_refl eq_refl Hen). }
+    set (P := fun i s (t : tba_transition root) =>
+                bt_source t = s /\ red p q (bt_target t) = run' (S i) /\
+                tba_transition_enabled rho i t).
+    set (step := fun i s => match first_such (P i s) (tba_transitions A) with
+                            | Some t => Some (bt_target t) | None => None end).
+    set (run := build_run step (tba_init A)).
+    (* the chosen transition exists at every step *)
+    assert (Hex : forall i, red p q (run i) = run' i ->
+                    exists t, In t (tba_transitions A) /\ P i (run i) t).
+    { intros i Hr. destruct (Hstep i) as [t [Ht [Hnq [Hs [Hd Hen]]]]].
+      destruct (Nat.eq_dec (run i) q) as [Eq|Nq].
+      - assert (Hsp : bt_source t = p) by (rewrite Hs, <- Hr, Eq; apply red_q).
+        destruct (covers_spec Hpq' Ht Hsp) as [t' [Ht' [Hs' Hsim]]].
+        destruct (sim_spec Hsim) as [Hen1 [_ Et]].
+        exists t'. split; [exact Ht'|]. split; [rewrite Eq; exact Hs'|].
+        split; [rewrite <- Et; exact Hd|].
+        exact (Hen1 rho i Hen).
+      - exists t. split; [exact Ht|].
+        split; [rewrite Hs, <- Hr; apply red_other; exact Nq|].
+        split; [exact Hd | exact Hen]. }
+    assert (Hrun : forall i, red p q (run i) = run' i).
+    { induction i as [|i IH].
+      - simpl. rewrite Hinit'. reflexivity.
+      - destruct (first_such_spec (Hex i IH)) as [t [Hf [_ [_ [Hd _]]]]].
+        change (run (S i)) with
+          (match step i (run i) with Some s => s | None => tba_init A end).
+        unfold step. rewrite Hf. exact Hd. }
+    assert (Hrun_q : forall i, run i <> q -> run i = run' i).
+    { intros i Hn. rewrite <- (Hrun i). symmetry. apply red_other. exact Hn. }
+    exists run. split; [reflexivity|]. split.
+    + intro i. split.
+      * destruct (Nat.eq_dec (run i) q) as [Eq|Nq]; [rewrite Eq; exact Hq|].
+        rewrite (Hrun_q i Nq). exact (proj1 (Hsteps' i)).
+      * destruct (first_such_spec (Hex i (Hrun i))) as [t [Hf [Ht [Hs [_ Hen]]]]].
+        exists t. split; [exact Ht|]. split; [exact Hs|].
+        split; [|exact Hen].
+        change (run (S i)) with
+          (match step i (run i) with Some s => s | None => tba_init A end).
+        unfold step. rewrite Hf. reflexivity.
+    + intro n. destruct (Hbuchi' n) as [j [Hj Ha]]. exists j. split; [exact Hj|].
+      destruct (Nat.eq_dec (run j) q) as [Eq|Nq].
+      * rewrite Eq. apply Hacc'. rewrite <- (Hrun j), Eq, red_q in Ha. exact Ha.
+      * rewrite (Hrun_q j Nq). exact Ha.
+Qed.
+
+Definition try_merge_states (p q : nat) (A : TBA root) : TBA root :=
+  if states_mergeable A p q then merge_states p q A else A.
+
+Definition state_pairs (n : nat) : list (nat * nat) :=
+  filter (fun pq => Nat.ltb (fst pq) (snd pq)) (list_prod (seq 0 n) (seq 0 n)).
+
+Definition merge_states_all (A : TBA root) : TBA root :=
+  fold_left (fun B pq => try_merge_states (fst pq) (snd pq) B)
+            (state_pairs (tba_nstates A)) A.
+
+Lemma try_merge_states_ext :
+  forall p q A (rho : ext_word root),
+    TBA_ext_accepts A rho <-> TBA_ext_accepts (try_merge_states p q A) rho.
+Proof.
+  intros p q A rho. unfold try_merge_states.
+  destruct (states_mergeable A p q) eqn:E; [apply merge_states_ext; exact E | reflexivity].
+Qed.
+
+Theorem merge_states_all_accepts :
+  forall A w, TBA_accepts A w <-> TBA_accepts (merge_states_all A) w.
+Proof.
+  intros A w. unfold merge_states_all.
+  generalize (state_pairs (tba_nstates A)) as ps. intro ps.
+  revert A. induction ps as [|[p q] ps IH]; intro A; simpl; [reflexivity|].
+  rewrite <- IH. unfold TBA_accepts. split.
+  - intros [rho [Hb [Hc Ha]]]. exists rho. split; [exact Hb|]. split; [exact Hc|].
+    apply try_merge_states_ext. exact Ha.
+  - intros [rho [Hb [Hc Ha]]]. exists rho. split; [exact Hb|]. split; [exact Hc|].
+    apply (try_merge_states_ext p q). exact Ha.
+Qed.
+
+(* ---------------------------------------------------------------------- *)
+(* Merging of transitions with the same source and target                  *)
+
+(* [rel old new]: every enabled transition of [old] has an enabled
+   counterpart in [new] with the same source and target, and conversely. *)
+Definition rel (old new : list (tba_transition root)) : Prop :=
+  (forall t, In t old -> forall (rho : ext_word root) i, tba_transition_enabled rho i t ->
+     exists u, In u new /\ bt_source u = bt_source t /\ bt_target u = bt_target t /\
+               tba_transition_enabled rho i u) /\
+  (forall u, In u new -> forall (rho : ext_word root) i, tba_transition_enabled rho i u ->
+     exists t, In t old /\ bt_source t = bt_source u /\ bt_target t = bt_target u /\
+               tba_transition_enabled rho i t).
+
+(* The sound direction needs the counterpart at the position where the
+   transition is taken, so it is proved on runs directly. *)
+Lemma rel_ext :
+  forall A ts, rel (tba_transitions A) ts ->
+    forall rho : ext_word root,
+      TBA_ext_accepts A rho <-> TBA_ext_accepts (with_transitions A ts) rho.
+Proof.
+  intros A ts [Hf Hb] rho. split.
+  - intros [run [Hinit [Hsteps Hbuchi]]].
+    apply with_transitions_complete with (run := run); try assumption.
+    intro i. destruct (Hsteps i) as [Hbd [t [Ht [Hs [Hd Hen]]]]].
+    split; [exact Hbd|].
+    destruct (Hf t Ht rho i Hen) as [u [Hu [Hus [Hut Hue]]]].
+    exists u. split; [exact Hu|]. split; [congruence|]. split; [congruence | exact Hue].
+  - intros [run [Hinit [Hsteps Hbuchi]]].
+    exists run. simpl in *. split; [exact Hinit|]. split; [|exact Hbuchi].
+    intro i. destruct (Hsteps i) as [Hbd [u [Hu [Hs [Hd Hen]]]]].
+    split; [exact Hbd|].
+    destruct (Hb u Hu rho i Hen) as [t [Ht [Hts [Htt Hte]]]].
+    exists t. split; [exact Ht|]. split; [congruence|]. split; [congruence | exact Hte].
+Qed.
+
+Lemma rel_trans : forall l1 l2 l3, rel l1 l2 -> rel l2 l3 -> rel l1 l3.
+Proof.
+  intros l1 l2 l3 [F12 B12] [F23 B23]. split.
+  - intros t Ht rho i Hen. destruct (F12 t Ht rho i Hen) as [u [Hu [Hs [Hd He]]]].
+    destruct (F23 u Hu rho i He) as [v [Hv [Hs' [Hd' He']]]].
+    exists v. split; [exact Hv|]. split; [congruence|]. split; [congruence | exact He'].
+  - intros v Hv rho i Hen. destruct (B23 v Hv rho i Hen) as [u [Hu [Hs [Hd He]]]].
+    destruct (B12 u Hu rho i He) as [t [Ht [Hs' [Hd' He']]]].
+    exists t. split; [exact Ht|]. split; [congruence|]. split; [congruence | exact He'].
+Qed.
+
+(* Same source, target, and resets. *)
+Definition same_ends (t u : tba_transition root) : bool :=
+  Nat.eqb (bt_source t) (bt_source u) && Nat.eqb (bt_target t) (bt_target u) &&
+  beq (list_eq_dec (@clock_eq_dec root)) (bt_resets t) (bt_resets u).
+
+Lemma same_ends_spec :
+  forall t u, same_ends t u = true ->
+    bt_source t = bt_source u /\ bt_target t = bt_target u /\ bt_resets t = bt_resets u.
+Proof.
+  intros t u H. unfold same_ends in H. repeat rewrite andb_true_iff in H.
+  destruct H as [[H1 H2] H3]. apply Nat.eqb_eq in H1. apply Nat.eqb_eq in H2.
+  apply beq_true in H3. tauto.
+Qed.
+
+(* Every constraint of [g'] is implied by a constraint of [g]. *)
+Definition guard_implied (g g' : guard root) : bool :=
+  forallb (fun o => match o with
+                    | None => true
+                    | Some k' => existsb (fun o2 => match o2 with
+                                                    | Some k => implies_c k k'
+                                                    | None => false end) g
+                    end) g'.
+
+Lemma guard_implied_holds :
+  forall (rho : ext_word root) i g g',
+    guard_implied g g' = true ->
+    Forall (guard_item_holds rho i) g -> Forall (guard_item_holds rho i) g'.
+Proof.
+  intros rho i g g' H Hg. unfold guard_implied in H. rewrite forallb_forall in H.
+  rewrite Forall_forall in *. intros [k'|] Ho; [|exact I].
+  specialize (H _ Ho). simpl in H. apply existsb_exists in H.
+  destruct H as [[k|] [Hk E]]; [|discriminate].
+  pose proof (Hg _ Hk) as Hh. simpl in *. apply cc_holds_at in Hh. apply cc_holds_at.
+  exact (implies_c_sound E Hh).
+Qed.
+
+(* [u] makes [t] redundant: same ends, weaker label and weaker guard. *)
+Definition subsumes (u t : tba_transition root) : bool :=
+  same_ends u t && set_incl alit_dec (bt_label u) (bt_label t) &&
+  guard_implied (bt_guard t) (bt_guard u).
+
+Lemma subsumes_spec :
+  forall u t, subsumes u t = true ->
+    bt_source u = bt_source t /\ bt_target u = bt_target t /\
+    forall (rho : ext_word root) i,
+      tba_transition_enabled rho i t -> tba_transition_enabled rho i u.
+Proof.
+  intros u t H. unfold subsumes in H. repeat rewrite andb_true_iff in H.
+  destruct H as [[He Hl] Hg]. destruct (same_ends_spec He) as [Hs [Hd Hr]].
+  split; [exact Hs|]. split; [exact Hd|].
+  intros rho i [H1 [H2 H3]]. split; [|split].
+  - exact (label_incl (set_incl_true Hl) H1).
+  - exact (guard_implied_holds Hg H2).
+  - unfold resets_match in *. rewrite Hr. exact H3.
+Qed.
+
+Definition insert_sub (t : tba_transition root) (acc : list (tba_transition root))
+    : list (tba_transition root) :=
+  if existsb (fun a => subsumes a t) acc then acc
+  else t :: filter (fun a => negb (subsumes t a)) acc.
+
+Lemma insert_sub_rel :
+  forall t l acc, rel l acc -> rel (t :: l) (insert_sub t acc).
+Proof.
+  intros t l acc [F B]. unfold insert_sub.
+  destruct (existsb (fun a => subsumes a t) acc) eqn:E.
+  - apply existsb_exists in E. destruct E as [a [Ha Hs]].
+    destruct (subsumes_spec Hs) as [Hsa [Hda Hen]]. split.
+    + intros t' [->|Ht'] rho i He.
+      * exists a. split; [exact Ha|]. split; [exact Hsa|]. split; [exact Hda|].
+        exact (Hen rho i He).
+      * exact (F t' Ht' rho i He).
+    + intros u Hu rho i He. destruct (B u Hu rho i He) as [t' [Ht' H]].
+      exists t'. split; [right; exact Ht' | exact H].
+  - split.
+    + intros t' [->|Ht'] rho i He.
+      * exists t'. split; [left; reflexivity|]. tauto.
+      * destruct (F t' Ht' rho i He) as [u [Hu [Hs [Hd Hue]]]].
+        destruct (subsumes t u) eqn:Etu.
+        -- destruct (subsumes_spec Etu) as [Hs' [Hd' Hen]].
+           exists t. split; [left; reflexivity|]. split; [congruence|].
+           split; [congruence | exact (Hen rho i Hue)].
+        -- exists u. split; [right; apply filter_In; rewrite Etu; tauto|]. tauto.
+    + intros u [->|Hu] rho i He.
+      * exists u. split; [left; reflexivity|]. tauto.
+      * apply filter_In in Hu. destruct (B u (proj1 Hu) rho i He) as [t' [Ht' H]].
+        exists t'. split; [right; exact Ht' | exact H].
+Qed.
+
+(* Resolution: two labels (or guards) that differ only by a literal and its
+   negation are replaced by their common part. *)
+Definition remove_item {A : Type} (d : forall a b : A, {a = b} + {a <> b}) (x : A)
+    (l : list A) : list A :=
+  filter (fun y => negb (beq d x y)) l.
+
+Lemma remove_item_incl :
+  forall (A : Type) d (x : A) l, incl (remove_item d x l) l.
+Proof. intros A d x l y Hy. apply filter_In in Hy. tauto. Qed.
+
+Lemma remove_item_cover :
+  forall (A : Type) d (x : A) l y, In y l -> y = x \/ In y (remove_item d x l).
+Proof.
+  intros A d x l y Hy. destruct (d x y) as [<-|N]; [left; reflexivity|].
+  right. apply filter_In. split; [exact Hy|]. unfold beq.
+  destruct (d x y); [contradiction | reflexivity].
+Qed.
+
+Definition neg_alit (l : alit) : alit := (fst l, negb (snd l)).
+
+Definition resolve_lab (l1 l2 : list alit) : option (list alit) :=
+  match find (fun x => existsb (beq alit_dec (neg_alit x)) l2 &&
+                       set_eqb alit_dec (remove_item alit_dec x l1)
+                               (remove_item alit_dec (neg_alit x) l2)) l1 with
+  | Some x => Some (remove_item alit_dec x l1)
+  | None => None
+  end.
+
+Lemma alit_cases : forall (e : Action) (x : alit), alit_holds e x \/ alit_holds e (neg_alit x).
+Proof.
+  intros e [a b]. unfold alit_holds, neg_alit. simpl.
+  destruct b; simpl; destruct (Nat.eq_dec e a); tauto.
+Qed.
+
+Lemma resolve_lab_spec :
+  forall l1 l2 m, resolve_lab l1 l2 = Some m ->
+    (forall le, label_holds l1 le -> label_holds m le) /\
+    (forall le, label_holds l2 le -> label_holds m le) /\
+    (forall le, label_holds m le -> label_holds l1 le \/ label_holds l2 le).
+Proof.
+  intros l1 l2 m H. unfold resolve_lab in H.
+  destruct (find _ l1) as [x|] eqn:E; [|discriminate]. injection H as <-.
+  apply find_some in E. destruct E as [Hx E].
+  apply andb_true_iff in E. destruct E as [Hn Hq].
+  apply existsb_exists in Hn. destruct Hn as [y [Hny Ey]]. apply beq_true in Ey. subst y.
+  unfold set_eqb in Hq. apply andb_true_iff in Hq. destruct Hq as [Hq1 Hq2].
+  apply set_incl_true in Hq1. apply set_incl_true in Hq2.
+  split; [|split].
+  - intros le H. exact (label_incl (@remove_item_incl _ alit_dec x l1) H).
+  - intros le H. apply (label_incl Hq1).
+    exact (label_incl (@remove_item_incl _ alit_dec (neg_alit x) l2) H).
+  - intros le H. unfold label_holds in *. rewrite Forall_forall in H.
+    destruct (alit_cases (letter_action le) x) as [Hxh|Hxh].
+    + left. apply Forall_forall. intros y Hy.
+      destruct (@remove_item_cover _ alit_dec x _ _ Hy) as [->|Hy']; [exact Hxh | exact (H y Hy')].
+    + right. apply Forall_forall. intros y Hy.
+      destruct (@remove_item_cover _ alit_dec (neg_alit x) _ _ Hy) as [->|Hy']; [exact Hxh|].
+      apply H. apply Hq2. exact Hy'.
+Qed.
+
+(* The complement of a non-strict/strict bound. *)
+Definition compl (k : clock_constraint root) : option (clock_constraint root) :=
+  let mk c := Some {| guard_clock := guard_clock k; guard_comparison := c;
+                      guard_bound := guard_bound k |} in
+  match guard_comparison k with
+  | CLe => mk CGt
+  | CLt => mk CGe
+  | CGe => mk CLt
+  | CGt => mk CLe
+  | CEq => None
+  end.
+
+Lemma compl_cases :
+  forall (rho : ext_word root) i k k', compl k = Some k' ->
+    clock_constraint_holds rho i k \/ clock_constraint_holds rho i k'.
+Proof.
+  intros rho i [x c d] k' H. unfold compl in H. simpl in H.
+  destruct c; try discriminate; injection H as <-;
+    unfold clock_constraint_holds; simpl;
+    destruct (Rle_lt_dec (ew_val rho i x) d); lra.
+Qed.
+
+Definition resolve_grd (g1 g2 : guard root) : option (guard root) :=
+  match find (fun o => match o with
+                       | Some k =>
+                           match compl k with
+                           | Some k' => existsb (beq item_dec (Some k')) g2 &&
+                                        set_eqb item_dec (remove_item item_dec o g1)
+                                                (remove_item item_dec (Some k') g2)
+                           | None => false
+                           end
+                       | None => false
+                       end) g1 with
+  | Some o => Some (remove_item item_dec o g1)
+  | None => None
+  end.
+
+Lemma resolve_grd_spec :
+  forall g1 g2 m, resolve_grd g1 g2 = Some m ->
+    forall (rho : ext_word root) i,
+    (Forall (guard_item_holds rho i) g1 -> Forall (guard_item_holds rho i) m) /\
+    (Forall (guard_item_holds rho i) g2 -> Forall (guard_item_holds rho i) m) /\
+    (Forall (guard_item_holds rho i) m ->
+       Forall (guard_item_holds rho i) g1 \/ Forall (guard_item_holds rho i) g2).
+Proof.
+  intros g1 g2 m H rho i. unfold resolve_grd in H.
+  destruct (find _ g1) as [o|] eqn:E; [|discriminate]. injection H as <-.
+  apply find_some in E. destruct E as [Ho E].
+  destruct o as [k|]; [|discriminate].
+  destruct (compl k) as [k'|] eqn:Ec; [|discriminate].
+  apply andb_true_iff in E. destruct E as [Hn Hq].
+  apply existsb_exists in Hn. destruct Hn as [y [Hny Ey]]. apply beq_true in Ey. subst y.
+  unfold set_eqb in Hq. apply andb_true_iff in Hq. destruct Hq as [Hq1 Hq2].
+  apply set_incl_true in Hq1. apply set_incl_true in Hq2.
+  split; [|split].
+  - intro H. exact (guard_incl (@remove_item_incl _ item_dec (Some k) g1) H).
+  - intro H. apply (guard_incl Hq1).
+    exact (guard_incl (@remove_item_incl _ item_dec (Some k') g2) H).
+  - intro H. rewrite Forall_forall in H.
+    destruct (compl_cases rho i Ec) as [Hk|Hk].
+    + left. apply Forall_forall. intros y Hy.
+      destruct (@remove_item_cover _ item_dec (Some k) _ _ Hy) as [->|Hy']; [exact Hk | exact (H y Hy')].
+    + right. apply Forall_forall. intros y Hy.
+      destruct (@remove_item_cover _ item_dec (Some k') _ _ Hy) as [->|Hy']; [exact Hk|].
+      apply H. apply Hq2. exact Hy'.
+Qed.
+
+Definition with_label (t : tba_transition root) (l : list alit) : tba_transition root :=
+  {| bt_source := bt_source t; bt_label := l; bt_guard := bt_guard t;
+     bt_resets := bt_resets t; bt_target := bt_target t |}.
+
+Definition with_guard (t : tba_transition root) (g : guard root) : tba_transition root :=
+  {| bt_source := bt_source t; bt_label := bt_label t; bt_guard := g;
+     bt_resets := bt_resets t; bt_target := bt_target t |}.
+
+(* Two transitions with the same ends, equal guards (as sets) and resolvable
+   labels, or equal labels (as sets) and resolvable guards. *)
+Definition resolve (u t : tba_transition root) : option (tba_transition root) :=
+  if same_ends u t then
+    if set_eqb item_dec (bt_guard u) (bt_guard t) then
+      match resolve_lab (bt_label u) (bt_label t) with
+      | Some m => Some (with_label u m) | None => None end
+    else if set_eqb alit_dec (bt_label u) (bt_label t) then
+      match resolve_grd (bt_guard u) (bt_guard t) with
+      | Some g => Some (with_guard u g) | None => None end
+    else None
+  else None.
+
+Lemma resolve_spec :
+  forall u t m, resolve u t = Some m ->
+    bt_source m = bt_source u /\ bt_target m = bt_target u /\
+    bt_source t = bt_source u /\ bt_target t = bt_target u /\
+    forall (rho : ext_word root) i,
+      (tba_transition_enabled rho i u -> tba_transition_enabled rho i m) /\
+      (tba_transition_enabled rho i t -> tba_transition_enabled rho i m) /\
+      (tba_transition_enabled rho i m ->
+         tba_transition_enabled rho i u \/ tba_transition_enabled rho i t).
+Proof.
+  intros u t m H. unfold resolve in H.
+  destruct (same_ends u t) eqn:Ee; [|discriminate].
+  destruct (same_ends_spec Ee) as [Hs [Hd Hr]].
+  destruct (set_eqb item_dec (bt_guard u) (bt_guard t)) eqn:Eg.
+  - destruct (resolve_lab (bt_label u) (bt_label t)) as [l|] eqn:El; [|discriminate].
+    injection H as <-. simpl.
+    destruct (resolve_lab_spec El) as [L1 [L2 L3]].
+    unfold set_eqb in Eg. apply andb_true_iff in Eg. destruct Eg as [G1 G2].
+    apply set_incl_true in G1. apply set_incl_true in G2.
+    split; [reflexivity|]. split; [reflexivity|]. split; [congruence|]. split; [congruence|].
+    intros rho i. unfold tba_transition_enabled. simpl. split; [|split].
+    + intros [H1 [H2 H3]]. split; [exact (L1 _ H1)|]. split; assumption.
+    + intros [H1 [H2 H3]]. split; [exact (L2 _ H1)|].
+      split; [exact (guard_incl G1 H2)|]. unfold resets_match in *. rewrite Hr. exact H3.
+    + intros [H1 [H2 H3]]. destruct (L3 _ H1) as [H1'|H1'].
+      * left. split; [exact H1'|]. split; assumption.
+      * right. split; [exact H1'|]. split; [exact (guard_incl G2 H2)|].
+        unfold resets_match in *. rewrite <- Hr. exact H3.
+  - destruct (set_eqb alit_dec (bt_label u) (bt_label t)) eqn:Elb; [|discriminate].
+    destruct (resolve_grd (bt_guard u) (bt_guard t)) as [g|] eqn:Eg'; [|discriminate].
+    injection H as <-. simpl.
+    unfold set_eqb in Elb. apply andb_true_iff in Elb. destruct Elb as [B1 B2].
+    apply set_incl_true in B1. apply set_incl_true in B2.
+    split; [reflexivity|]. split; [reflexivity|]. split; [congruence|]. split; [congruence|].
+    intros rho i. destruct (resolve_grd_spec Eg' rho i) as [R1 [R2 R3]].
+    unfold tba_transition_enabled. simpl. split; [|split].
+    + intros [H1 [H2 H3]]. split; [exact H1|]. split; [exact (R1 H2) | exact H3].
+    + intros [H1 [H2 H3]]. split; [exact (label_incl B1 H1)|].
+      split; [exact (R2 H2)|]. unfold resets_match in *. rewrite Hr. exact H3.
+    + intros [H1 [H2 H3]]. destruct (R3 H2) as [H2'|H2'].
+      * left. split; [exact H1|]. split; assumption.
+      * right. split; [exact (label_incl B2 H1)|]. split; [exact H2'|].
+        unfold resets_match in *. rewrite <- Hr. exact H3.
+Qed.
+
+Definition insert_res (t : tba_transition root) (acc : list (tba_transition root))
+    : list (tba_transition root) :=
+  match find (fun a => match resolve a t with Some _ => true | None => false end) acc with
+  | Some a =>
+      match resolve a t with
+      | Some m => m :: remove_item tr_dec a acc
+      | None => t :: acc
+      end
+  | None => t :: acc
+  end.
+
+Lemma insert_res_rel :
+  forall t l acc, rel l acc -> rel (t :: l) (insert_res t acc).
+Proof.
+  intros t l acc [F B].
+  assert (Hadd : rel (t :: l) (t :: acc)).
+  { split.
+    - intros t' [->|Ht'] rho i He.
+      + exists t'. split; [left; reflexivity|]. tauto.
+      + destruct (F t' Ht' rho i He) as [u [Hu H]]. exists u. split; [right; exact Hu | exact H].
+    - intros u [->|Hu] rho i He.
+      + exists u. split; [left; reflexivity|]. tauto.
+      + destruct (B u Hu rho i He) as [t' [Ht' H]]. exists t'. split; [right; exact Ht' | exact H]. }
+  unfold insert_res.
+  destruct (find _ acc) as [a|] eqn:Ef; [|exact Hadd].
+  destruct (resolve a t) as [m|] eqn:Er; [|exact Hadd].
+  apply find_some in Ef. destruct Ef as [Ha _].
+  destruct (resolve_spec Er) as [Hms [Hmd [Hts [Htd Hen]]]].
+  split.
+  - intros t' [->|Ht'] rho i He.
+    + exists m. split; [left; reflexivity|]. split; [congruence|]. split; [congruence|].
+      exact (proj1 (proj2 (Hen rho i)) He).
+    + destruct (F t' Ht' rho i He) as [u [Hu [Hus [Hud Hue]]]].
+      destruct (@remove_item_cover _ tr_dec a _ _ Hu) as [->|Hu'].
+      * exists m. split; [left; reflexivity|]. split; [congruence|]. split; [congruence|].
+        exact (proj1 (Hen rho i) Hue).
+      * exists u. split; [right; exact Hu'|]. tauto.
+  - intros u [->|Hu] rho i He.
+    + destruct (proj2 (proj2 (Hen rho i)) He) as [Ha'|Ht'].
+      * destruct (B a Ha rho i Ha') as [t' [Ht'' [Hs [Hd Hte]]]].
+        exists t'. split; [right; exact Ht''|]. split; [congruence|]. split; [congruence | exact Hte].
+      * exists t. split; [left; reflexivity|]. split; [congruence|]. split; [congruence | exact Ht'].
+    + apply remove_item_incl in Hu. destruct (B u Hu rho i He) as [t' [Ht' H]].
+      exists t'. split; [right; exact Ht' | exact H].
+Qed.
+
+Lemma fold_rel :
+  forall (ins : tba_transition root -> list (tba_transition root) -> list (tba_transition root)),
+    (forall t l acc, rel l acc -> rel (t :: l) (ins t acc)) ->
+    forall l, rel l (fold_right ins [] l).
+Proof.
+  intros ins Hins l. induction l as [|t l IH]; simpl.
+  - split; intros x Hx; contradiction.
+  - apply Hins. exact IH.
+Qed.
+
+Definition merge_trans (A : TBA root) : TBA root :=
+  with_transitions A
+    (fold_right insert_res [] (fold_right insert_sub [] (tba_transitions A))).
+
+Theorem merge_trans_accepts :
+  forall A w, TBA_accepts A w <-> TBA_accepts (merge_trans A) w.
+Proof.
+  intros A w.
+  assert (Hrel : rel (tba_transitions A)
+                     (fold_right insert_res [] (fold_right insert_sub [] (tba_transitions A)))).
+  { apply rel_trans with (fold_right insert_sub [] (tba_transitions A)).
+    - apply fold_rel. exact insert_sub_rel.
+    - apply fold_rel. exact insert_res_rel. }
+  unfold merge_trans, TBA_accepts. split.
+  - intros [rho [Hb [Hc Ha]]]. exists rho. split; [exact Hb|]. split; [exact Hc|].
+    apply (rel_ext Hrel). exact Ha.
+  - intros [rho [Hb [Hc Ha]]]. exists rho. split; [exact Hb|]. split; [exact Hc|].
+    apply (rel_ext Hrel). exact Ha.
+Qed.
+
+(* ====================================================================== *)
 (* 7. The optimization pipeline, iterated                                 *)
 (* ====================================================================== *)
 
@@ -1448,11 +2250,12 @@ Qed.
    removal of useless resets, merging of synchronously reset clocks, and a
    final normalization. *)
 Definition optimize_step (A : TBA root) : TBA root :=
-  normalize
+  merge_states_all (merge_trans (normalize
     (merge_all
        (remove_dead_resets
           (normalize
-             (remove_unreachable (remove_contradictory (forward (propagate A))))))).
+             (remove_unreachable
+                (remove_unsat (remove_contradictory (forward (propagate A)))))))))).
 
 Fixpoint optimize (n : nat) (A : TBA root) : TBA root :=
   match n with
@@ -1467,15 +2270,20 @@ Proof.
   rewrite (propagate_accepts A w).
   rewrite (forward_accepts (propagate A) w).
   rewrite (remove_contradictory_accepts (forward (propagate A)) w).
+  rewrite (remove_unsat_accepts (remove_contradictory (forward (propagate A))) w).
   rewrite (remove_unreachable_accepts
-             (remove_contradictory (forward (propagate A))) w).
+             (remove_unsat (remove_contradictory (forward (propagate A)))) w).
   rewrite (normalize_accepts
-             (remove_unreachable (remove_contradictory (forward (propagate A)))) w).
+             (remove_unreachable
+                (remove_unsat (remove_contradictory (forward (propagate A))))) w).
   rewrite (remove_dead_resets_accepts
              (normalize
-                (remove_unreachable (remove_contradictory (forward (propagate A))))) w).
+                (remove_unreachable
+                   (remove_unsat (remove_contradictory (forward (propagate A)))))) w).
   rewrite merge_all_accepts.
-  apply normalize_accepts.
+  rewrite normalize_accepts.
+  rewrite merge_trans_accepts.
+  apply merge_states_all_accepts.
 Qed.
 
 Theorem optimize_accepts :

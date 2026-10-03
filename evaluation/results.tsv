@@ -1,0 +1,24 @@
+id	description	clocks_f	spot_st	spot_tr	comp_st	comp_tr	opt_st	opt_tr	opt_clk	exp_st	exp_tr	exp_clk	exp_inv	exp_diff	time_s	casaal_exact	casaal_st	casaal_tr	casaal_clk	casaal_s
+F1	bounded response	1	3	7	3	7	3	7	1	4	10	1	2	0	0.020	yes	2	4	1	0.31
+F2	bounded invariance	1	2	5	2	5	1	1	0	2	2	0	0	0	0.021	yes	2	5	1	0.03
+F3	sporadicity (hatted)	1	2	5	2	5	2	5	1	3	7	1	0	0	0.021	no	3	6	1	0.03
+F3b	sporadicity, no hat	1	1	1	1	1	1	1	0	2	2	0	0	0	0.022	yes	1	1	0	0.04
+F4	time-bounded until	1	3	7	3	7	3	7	1	4	10	1	2	0	0.021	yes	2	4	1	0.03
+F5	minimum delay response	1	7	38	7	38	7	25	1	8	27	1	0	0	0.034	yes	4	19	1	0.04
+F6	strict minimum delay response	1	7	38	7	38	7	25	1	8	27	1	0	0	0.027	yes	4	19	1	0.04
+F7	bounded recurrence	1	3	6	3	6	3	6	1	4	8	1	2	0	0.018	yes	2	4	1	0.03
+F8	recurrence with minimum delay	1	5	15	5	15	5	15	1	6	19	1	0	0	0.025	yes	2	4	1	0.05
+F9	Example 1	2	5	16	5	16	5	16	2	6	25	2	4	0	0.032	yes	4	9	2	0.05
+F10	Example 2	3	6	23	6	23	5	16	3	6	25	3	4	0	0.036	yes	5	12	3	0.06
+F11	Example 3	2	5	11	5	11	4	7	1	4	7	1	2	0	0.035	yes	4	7	2	0.06
+F12	response within a window	2	5	23	5	23	4	13	2	5	15	2	3	0	0.064	yes	3	9	2	0.06
+F13	periodicity (hatted)	2	6	23	6	23	4	9	2	4	9	2	3	0	0.075	no	4	7	2	0.06
+F14	closeness	2	8	38	8	38	8	25	2	9	32	2	6	2	0.130	yes	8	22	2	0.07
+R1	1 bounded response	1	3	7	3	7	3	7	1	4	10	1	2	0	0.033	yes	2	4	1	0.06
+R2	2 bounded responses	2	8	45	8	45	7	27	2	8	38	2	6	4	0.073	yes	4	16	2	0.05
+R3	3 bounded responses	3	20	275	20	275	17	90	3	18	152	3	16	78	0.246	yes	8	64	3	0.06
+R4	4 bounded responses	4	48	1625	48	1625	41	276	4	42	588	4	40	606	3.124	yes	16	256	4	0.13
+N1	nesting depth 1	1	3	5	3	5	3	5	1	3	5	1	1	0	0.023	yes	3	5	1	0.05
+N2	nesting depth 2	2	5	19	5	19	5	14	2	6	26	2	4	4	0.029	yes	4	9	2	0.05
+N3	nesting depth 3	3	9	94	9	94	9	50	3	14	173	3	12	68	0.099	yes	5	14	3	0.04
+N4	nesting depth 4	4	17	501	17	501	17	184	4	34	1035	4	32	672	3.223	yes	6	20	4	0.05
