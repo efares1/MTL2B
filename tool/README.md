@@ -50,6 +50,8 @@ are named `A<n>`.  UPPAAL does not check Buchi acceptance.
 
 ## Build
 
-From the parent folder: `make tool` (requires dune and menhir).
-`examples/` contains the output for Examples 1 and 3 of the paper and for
-the sporadicity requirement.
+`dune build` in this folder (requires dune and menhir).  The extracted
+module `src/optim.ml` is included; `make` in `../proof` regenerates it from
+the Coq development, and `make tool` there rebuilds the tool.  `examples/`
+contains the output for Examples 1 and 3 of the paper and for the
+sporadicity requirement.
