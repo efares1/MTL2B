@@ -1,8 +1,9 @@
-(* Extraction of the optimisation pipeline to OCaml (optim.ml).
+(* Extraction of the optimisation pipeline and of the export to OCaml
+   (optim.ml).
    nat -> int, bool -> bool, lists -> lists, R -> float. *)
 From Stdlib Require Import Reals Extraction ExtrOcamlBasic ExtrOcamlNatInt ExtrOcamlZInt.
 Require Import MTL_to_TBA_Shared_Clock_Derived_Strict_Direct_Core.
-Require Import MTL_to_TBA_Invariants MTL_to_TBA_Optimizations.
+Require Import MTL_to_TBA_Invariants MTL_to_TBA_Optimizations MTL_to_TBA_Export.
 
 (* Real numbers as OCaml floats. *)
 Extract Constant R => "float".
@@ -30,4 +31,8 @@ Extract Constant Rrepr => "(fun _ -> failwith ""Rrepr: not used"")".
 Extract Constant ClassicalDedekindReals.sig_forall_dec =>
   "(fun _ -> failwith ""sig_forall_dec: not used"")".
 
-Extraction "optim.ml" optimized optimize.
+(* [optimize_export n A]: n rounds of optimization, then the export. *)
+Definition optimize_export {root : mtl} (n : nat) (A : TBA root) : DTA root :=
+  export (optimize n A).
+
+Extraction "optim.ml" optimized optimize export optimize_export.

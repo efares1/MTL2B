@@ -27,6 +27,10 @@
 
   4. Merging of synchronously reset clocks.
 
+  5. Normalization of guards: removal of empty items, of trivially true
+     lower bounds, and of constraints implied by another constraint of the
+     same guard.
+
   Each step preserves the language of timed words; the steps are iterated
   [n] times, for every [n], together with the backward propagation of
   MTL_to_TBA_Invariants.v.
@@ -1325,15 +1329,222 @@ Qed.
 
 
 (* ====================================================================== *)
+(* 6c. Normalization of guards                                            *)
+(* ====================================================================== *)
+
+(* The passes above only add constraints to guards, which accumulate
+   duplicates and implied constraints.  Normalization drops the empty items,
+   the lower bounds that every clock value satisfies (x >= m with m <= 0,
+   x > m with m < 0), and every constraint implied by another constraint of
+   the same guard on the same clock. *)
+
+Definition dec_b {P Q : Prop} (d : {P} + {Q}) : bool := if d then true else false.
+
+Lemma dec_b_true : forall (P Q : Prop) (d : {P} + {Q}), dec_b d = true -> P.
+Proof. intros P Q [p|q] H; [exact p | discriminate]. Qed.
+
+(* Satisfaction of a clock constraint by a clock valuation. *)
+Definition cc_holds (v : Clock root -> R) (k : clock_constraint root) : Prop :=
+  match guard_comparison k with
+  | CLe => v (guard_clock k) <= guard_bound k
+  | CLt => v (guard_clock k) < guard_bound k
+  | CGe => guard_bound k <= v (guard_clock k)
+  | CGt => guard_bound k < v (guard_clock k)
+  | CEq => v (guard_clock k) = guard_bound k
+  end.
+
+Lemma cc_holds_at :
+  forall (rho : ext_word root) i k,
+    clock_constraint_holds rho i k <-> cc_holds (fun x => ew_val rho i x) k.
+Proof. intros rho i k. unfold clock_constraint_holds, cc_holds. tauto. Qed.
+
+(* [implies_c a b = true]: the constraint [a] implies the constraint [b]. *)
+Definition implies_c (a b : clock_constraint root) : bool :=
+  let u := guard_bound a in
+  let w := guard_bound b in
+  clock_eqb (guard_clock a) (guard_clock b) &&
+  match guard_comparison b with
+  | CLe => match guard_comparison a with
+           | CLe | CLt | CEq => dec_b (Rle_dec u w)
+           | _ => false
+           end
+  | CLt => match guard_comparison a with
+           | CLe | CEq => dec_b (Rlt_dec u w)
+           | CLt => dec_b (Rle_dec u w)
+           | _ => false
+           end
+  | CGe => match guard_comparison a with
+           | CGe | CGt | CEq => dec_b (Rle_dec w u)
+           | _ => false
+           end
+  | CGt => match guard_comparison a with
+           | CGe | CEq => dec_b (Rlt_dec w u)
+           | CGt => dec_b (Rle_dec w u)
+           | _ => false
+           end
+  | CEq => match guard_comparison a with
+           | CEq => dec_b (Req_EM_T u w)
+           | _ => false
+           end
+  end.
+
+Lemma implies_c_sound :
+  forall v a b, implies_c a b = true -> cc_holds v a -> cc_holds v b.
+Proof.
+  intros v [xa ca ua] [xb cb ub] Himp Ha.
+  unfold implies_c, cc_holds in *. simpl in *.
+  apply andb_true_iff in Himp. destruct Himp as [Hx Hc].
+  apply clock_eqb_true in Hx. subst xb.
+  destruct cb, ca; try discriminate; apply dec_b_true in Hc; lra.
+Qed.
+
+(* Lower bounds that every (nonnegative) clock value satisfies. *)
+Definition trivial_c (k : clock_constraint root) : bool :=
+  match guard_comparison k with
+  | CGe => dec_b (Rle_dec (guard_bound k) 0)
+  | CGt => dec_b (Rlt_dec (guard_bound k) 0)
+  | _ => false
+  end.
+
+Lemma trivial_c_sound :
+  forall v k, (forall x, 0 <= v x) -> trivial_c k = true -> cc_holds v k.
+Proof.
+  intros v [x c b] Hnn H. unfold trivial_c, cc_holds in *. simpl in *.
+  specialize (Hnn x).
+  destruct c; try discriminate; apply dec_b_true in H; lra.
+Qed.
+
+Definition insert_c (c : clock_constraint root) (acc : list (clock_constraint root))
+    : list (clock_constraint root) :=
+  if trivial_c c then acc
+  else if existsb (fun a => implies_c a c) acc then acc
+  else c :: filter (fun a => negb (implies_c c a)) acc.
+
+Fixpoint present (g : guard root) : list (clock_constraint root) :=
+  match g with
+  | [] => []
+  | Some k :: g' => k :: present g'
+  | None :: g' => present g'
+  end.
+
+Definition norm_guard (g : guard root) : guard root :=
+  map Some (fold_right insert_c [] (present g)).
+
+Lemma insert_c_holds :
+  forall v c acc,
+    (forall x, 0 <= v x) ->
+    (Forall (cc_holds v) (insert_c c acc) <->
+     cc_holds v c /\ Forall (cc_holds v) acc).
+Proof.
+  intros v c acc Hnn. unfold insert_c.
+  destruct (trivial_c c) eqn:Ht.
+  - pose proof (trivial_c_sound Hnn Ht). tauto.
+  - destruct (existsb (fun a => implies_c a c) acc) eqn:He.
+    + apply existsb_exists in He. destruct He as [a [Ha Hac]].
+      split; [|tauto]. intro H. split; [|exact H].
+      rewrite Forall_forall in H. exact (implies_c_sound Hac (H a Ha)).
+    + rewrite Forall_cons_iff. split.
+      * intros [Hc Hf]. split; [exact Hc|].
+        rewrite Forall_forall in *. intros a Ha.
+        destruct (implies_c c a) eqn:E.
+        -- exact (implies_c_sound E Hc).
+        -- apply Hf. apply filter_In. split; [exact Ha|]. rewrite E. reflexivity.
+      * intros [Hc Hf]. split; [exact Hc|].
+        rewrite Forall_forall in *. intros a Ha.
+        apply filter_In in Ha. apply Hf. tauto.
+Qed.
+
+Lemma fold_insert_holds :
+  forall v l,
+    (forall x, 0 <= v x) ->
+    (Forall (cc_holds v) (fold_right insert_c [] l) <-> Forall (cc_holds v) l).
+Proof.
+  intros v l Hnn. induction l as [|c l IH]; simpl; [tauto|].
+  rewrite (insert_c_holds c _ Hnn), IH, Forall_cons_iff. tauto.
+Qed.
+
+Lemma present_holds :
+  forall (rho : ext_word root) i g,
+    Forall (guard_item_holds rho i) g <->
+    Forall (cc_holds (fun x => ew_val rho i x)) (present g).
+Proof.
+  intros rho i g. induction g as [|[k|] g IH]; simpl.
+  - split; intros _; constructor.
+  - rewrite !Forall_cons_iff, IH. simpl. rewrite cc_holds_at. tauto.
+  - rewrite Forall_cons_iff, IH. simpl. tauto.
+Qed.
+
+Lemma norm_guard_holds :
+  forall (rho : ext_word root) i g,
+    (forall x, 0 <= ew_val rho i x) ->
+    (Forall (guard_item_holds rho i) (norm_guard g) <->
+     Forall (guard_item_holds rho i) g).
+Proof.
+  intros rho i g Hnn. unfold norm_guard.
+  transitivity (Forall (cc_holds (fun x => ew_val rho i x))
+                       (fold_right insert_c [] (present g))).
+  - rewrite Forall_map.
+    split; intro H; eapply Forall_impl; try exact H;
+      intros k Hk; simpl in *; apply cc_holds_at; exact Hk.
+  - rewrite (@fold_insert_holds (fun x => ew_val rho i x) (present g) Hnn).
+    symmetry. apply present_holds.
+Qed.
+
+Definition normalize_transition (t : tba_transition root) : tba_transition root :=
+  {| bt_source := bt_source t;
+     bt_label := bt_label t;
+     bt_guard := norm_guard (bt_guard t);
+     bt_resets := bt_resets t;
+     bt_target := bt_target t |}.
+
+Definition normalize (A : TBA root) : TBA root :=
+  with_transitions A (map normalize_transition (tba_transitions A)).
+
+Lemma normalize_enabled :
+  forall (rho : ext_word root) i t,
+    clock_consistent rho ->
+    (tba_transition_enabled rho i (normalize_transition t) <->
+     tba_transition_enabled rho i t).
+Proof.
+  intros rho i t [Hnn _].
+  unfold tba_transition_enabled, normalize_transition. simpl.
+  rewrite (norm_guard_holds (bt_guard t) (Hnn i)). tauto.
+Qed.
+
+Theorem normalize_accepts :
+  forall A w, TBA_accepts A w <-> TBA_accepts (normalize A) w.
+Proof.
+  intros A w. unfold TBA_accepts. split.
+  - intros [rho [Hb [Hcc Ha]]]. exists rho. split; [exact Hb|]. split; [exact Hcc|].
+    destruct Ha as [run [Hinit [Hsteps Hbuchi]]].
+    apply with_transitions_complete with (run := run); try assumption.
+    intro i. destruct (Hsteps i) as [Hbound [t [Hin [Hsrc [Hdst Hen]]]]].
+    split; [exact Hbound|].
+    exists (normalize_transition t). split; [apply in_map; exact Hin|].
+    split; [exact Hsrc|]. split; [exact Hdst|].
+    apply (normalize_enabled i t Hcc). exact Hen.
+  - intros [rho [Hb [Hcc Ha]]]. exists rho. split; [exact Hb|]. split; [exact Hcc|].
+    revert Ha. apply with_transitions_sound.
+    intros t' Hin. apply in_map_iff in Hin. destruct Hin as [t [<- Hin]].
+    exists t. split; [exact Hin|]. split; [reflexivity|]. split; [reflexivity|].
+    intros i Hen. apply (normalize_enabled i t Hcc). exact Hen.
+Qed.
+
+(* ====================================================================== *)
 (* 7. The optimization pipeline, iterated                                 *)
 (* ====================================================================== *)
 
 (* One round: backward propagation, forward propagation, simplification,
-   removal of useless resets, and merging of synchronously reset clocks. *)
+   normalization of the guards (which removes the trivial lower bounds
+   x >= 0 added by the forward step, so that they do not keep clocks live),
+   removal of useless resets, merging of synchronously reset clocks, and a
+   final normalization. *)
 Definition optimize_step (A : TBA root) : TBA root :=
-  merge_all
-    (remove_dead_resets
-       (remove_unreachable (remove_contradictory (forward (propagate A))))).
+  normalize
+    (merge_all
+       (remove_dead_resets
+          (normalize
+             (remove_unreachable (remove_contradictory (forward (propagate A))))))).
 
 Fixpoint optimize (n : nat) (A : TBA root) : TBA root :=
   match n with
@@ -1350,9 +1561,13 @@ Proof.
   rewrite (remove_contradictory_accepts (forward (propagate A)) w).
   rewrite (remove_unreachable_accepts
              (remove_contradictory (forward (propagate A))) w).
-  rewrite (remove_dead_resets_accepts
+  rewrite (normalize_accepts
              (remove_unreachable (remove_contradictory (forward (propagate A)))) w).
-  apply merge_all_accepts.
+  rewrite (remove_dead_resets_accepts
+             (normalize
+                (remove_unreachable (remove_contradictory (forward (propagate A))))) w).
+  rewrite merge_all_accepts.
+  apply normalize_accepts.
 Qed.
 
 Theorem optimize_accepts :

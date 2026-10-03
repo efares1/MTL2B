@@ -24,6 +24,13 @@
 
   4. Disjunctive guards are split into one transition per disjunct.
 
+  5. Normalization: in every guard, constraints implied by another
+     constraint of the same conjunction, trivial differences x - x <= b,
+     unsatisfiable conjunctions, and conjunctions implying another one are
+     removed; disjuncts of an invariant implied by another disjunct are
+     removed; and the transitions leaving the copies that are never
+     entered are removed.
+
   The final automaton has conjunctive guards and conjunctive upper-bound
   invariants, and accepts exactly the models of the formula.  No new
   axiom: the only project axiom remains LTL_TO_BUCHI_CORRECT.
@@ -454,17 +461,83 @@ Qed.
 Definition outgoing_d (D : DTA) (l : nat) : list dtrans :=
   filter (fun t => Nat.eqb (dt_src t) l) (dta_trans D).
 
-(* Disjunctive invariant of [l]: one disjunct per conjunct of an outgoing
-   guard. *)
-Definition disj_inv (D : DTA) (l : nat) : list uinv :=
-  flat_map (fun t => map ub_conj (dt_guard t)) (outgoing_d D l).
+(* [uimplies U U' = true]: the conjunction of bounds [U] implies [U']: every
+   bound of [U'] is implied by a bound of [U] on the same clock. *)
+Definition uimplies (U U' : uinv) : bool :=
+  forallb (fun p => existsb (fun q => clock_eqb (fst q) (fst p) &&
+                                      dec_b (Rle_dec (snd q) (snd p))) U) U'.
 
-Lemma disj_inv_in :
+Lemma uimplies_refl : forall U, uimplies U U = true.
+Proof.
+  intro U. unfold uimplies. apply forallb_forall. intros p Hp.
+  apply existsb_exists. exists p. split; [exact Hp|].
+  rewrite clock_eqb_refl. unfold dec_b.
+  destruct (Rle_dec (snd p) (snd p)) as [_|N]; [reflexivity | exfalso; lra].
+Qed.
+
+Lemma uimplies_trans :
+  forall A B C, uimplies A B = true -> uimplies B C = true -> uimplies A C = true.
+Proof.
+  intros A B C H1 H2. unfold uimplies in *. rewrite forallb_forall in *.
+  intros p Hp. specialize (H2 p Hp). apply existsb_exists in H2.
+  destruct H2 as [q [Hq Hqp]]. specialize (H1 q Hq). apply existsb_exists in H1.
+  destruct H1 as [r [Hr Hrq]]. apply existsb_exists. exists r. split; [exact Hr|].
+  apply andb_true_iff in Hqp. destruct Hqp as [Hc1 Hb1].
+  apply andb_true_iff in Hrq. destruct Hrq as [Hc2 Hb2].
+  apply clock_eqb_true in Hc1. apply clock_eqb_true in Hc2.
+  apply dec_b_true in Hb1. apply dec_b_true in Hb2.
+  rewrite Hc2, Hc1, clock_eqb_refl. unfold dec_b.
+  destruct (Rle_dec (snd r) (snd p)) as [_|N]; [reflexivity | exfalso; lra].
+Qed.
+
+(* A disjunct implied by another one is redundant in a disjunction. *)
+Definition insert_u (U : uinv) (acc : list uinv) : list uinv :=
+  if existsb (fun a => uimplies U a) acc then acc
+  else U :: filter (fun a => negb (uimplies a U)) acc.
+
+Definition dedupe_u (l : list uinv) : list uinv := fold_right insert_u [] l.
+
+Lemma insert_u_cover :
+  forall U acc,
+    (exists U', In U' (insert_u U acc) /\ uimplies U U' = true) /\
+    (forall a, In a acc -> exists U', In U' (insert_u U acc) /\ uimplies a U' = true).
+Proof.
+  intros U acc. unfold insert_u.
+  destruct (existsb (fun a => uimplies U a) acc) eqn:E.
+  - split.
+    + apply existsb_exists in E. destruct E as [a [Ha HUa]]. exists a. tauto.
+    + intros a Ha. exists a. split; [exact Ha | apply uimplies_refl].
+  - split.
+    + exists U. split; [left; reflexivity | apply uimplies_refl].
+    + intros a Ha. destruct (uimplies a U) eqn:E2.
+      * exists U. split; [left; reflexivity | exact E2].
+      * exists a. split; [|apply uimplies_refl].
+        right. apply filter_In. rewrite E2. tauto.
+Qed.
+
+Lemma dedupe_u_cover :
+  forall l U, In U l -> exists U', In U' (dedupe_u l) /\ uimplies U U' = true.
+Proof.
+  induction l as [|a l IH]; intros U HU; [contradiction|].
+  unfold dedupe_u. simpl. fold (dedupe_u l).
+  destruct (insert_u_cover a (dedupe_u l)) as [Ha Hacc].
+  destruct HU as [<-|HU]; [exact Ha|].
+  destruct (IH U HU) as [U' [HU' HUU']].
+  destruct (Hacc U' HU') as [U'' [HU'' HU'U'']].
+  exists U''. split; [exact HU''|]. exact (uimplies_trans HUU' HU'U'').
+Qed.
+
+(* Invariant of a location: one disjunct per conjunct of an outgoing guard
+   (its upper bounds), without the disjuncts implied by another one. *)
+Definition disj_inv (D : DTA) (l : nat) : list uinv :=
+  dedupe_u (flat_map (fun t => map ub_conj (dt_guard t)) (outgoing_d D l)).
+
+Lemma disj_inv_cover :
   forall D t c,
     In t (dta_trans D) -> In c (dt_guard t) ->
-    In (ub_conj c) (disj_inv D (dt_src t)).
+    exists U, In U (disj_inv D (dt_src t)) /\ uimplies (ub_conj c) U = true.
 Proof.
-  intros D t c Ht Hc. unfold disj_inv. apply in_flat_map.
+  intros D t c Ht Hc. unfold disj_inv. apply dedupe_u_cover. apply in_flat_map.
   exists t. split.
   - unfold outgoing_d. apply filter_In. split; [exact Ht | apply Nat.eqb_refl].
   - apply in_map. exact Hc.
@@ -543,6 +616,22 @@ Lemma dmin_none : forall U v, dmin U v = None -> U = [].
 Proof.
   intros [|[x b] U] v H; [reflexivity|]. simpl in H.
   destruct (dmin U v); discriminate.
+Qed.
+
+(* A stronger conjunction of bounds admits shorter delays. *)
+Lemma uimplies_dmin :
+  forall U U' v, uimplies U U' = true -> Dle (dmin U v) (dmin U' v).
+Proof.
+  intros U U' v H.
+  destruct (dmin U' v) as [m'|] eqn:E'; [|destruct (dmin U v); exact I].
+  destruct (dmin_attained E') as [q [Hq Hm']].
+  unfold uimplies in H. rewrite forallb_forall in H. specialize (H q Hq).
+  apply existsb_exists in H. destruct H as [r [Hr Hrq]].
+  apply andb_true_iff in Hrq. destruct Hrq as [Hc Hb].
+  apply clock_eqb_true in Hc. apply dec_b_true in Hb.
+  destruct (dmin U v) as [m|] eqn:E.
+  - simpl. pose proof (dmin_le E Hr) as Hle. rewrite Hc in Hle. lra.
+  - apply dmin_none in E. subst U. contradiction.
 Qed.
 
 (* [U] holds after a delay [d] from [v] iff [d] is at most the delay
@@ -1034,7 +1123,7 @@ Proof.
   (* the invariant of every visited location has a disjunct *)
   assert (Hne : forall i, Us (run i) <> []).
   { intro i. destruct (Hsteps i) as [_ [_ [t [Ht [Hs [_ [_ [[c [Hc _]] _]]]]]]]].
-    pose proof (disj_inv_in Ht Hc) as H. unfold Us. rewrite <- Hs.
+    destruct (disj_inv_cover Ht Hc) as [U [H _]]. unfold Us. rewrite <- Hs.
     intro E. rewrite E in H. exact H. }
   assert (Hds_ne : forall j, ds j <> []).
   { intros j E. unfold ds in E. apply map_eq_nil in E. exact (Hne (S j) E). }
@@ -1063,13 +1152,14 @@ Proof.
       rewrite <- Hnth, <- !Hds_nth. apply Hmax. rewrite Hlen_ds. exact Hl. }
     split; [exact Hmax'|].
     destruct (Hsteps (S j)) as [_ [_ [t [Ht [Hs [_ [_ [[c [Hc Hch]] _]]]]]]]].
-    pose proof (disj_inv_in Ht Hc) as HU. rewrite Hs in HU.
+    destruct (disj_inv_cover Ht Hc) as [U [HU HUi]]. rewrite Hs in HU.
     pose proof (ub_conj_sound Hch) as Hub.
     assert (Hshift : uinv_holds (fun x => v j x + delta (ew_base rho) j) (ub_conj c)).
     { apply (uinv_holds_ext (v := at_event rho (S j))); [|exact Hub].
       intro x. unfold v, at_event. ring. }
     apply uinv_shift in Hshift.
     apply Dle_trans with (dmin (ub_conj c) (v j)); [exact Hshift|].
+    apply Dle_trans with (dmin U (v j)); [apply uimplies_dmin; exact HUi|].
     apply Hmax'. exact HU. }
   exists (fun i => enc D (run i) (copy i)).
   split; [simpl; rewrite Hinit; reflexivity|].
@@ -1227,11 +1317,280 @@ Proof.
 Qed.
 
 (* ====================================================================== *)
+(* 9b. Normalization of the exported guards                               *)
+(* ====================================================================== *)
+
+(* In every conjunction of a guard, a constraint implied by another one
+   (same clock, or same pair of clocks for a difference) is dropped, as are
+   the differences x - x <= b with b >= 0.  A conjunction containing a
+   difference x - x <= b with b < 0 is unsatisfiable and is dropped from the
+   guard, as is a conjunction that implies another one. *)
+Definition implies_d (a b : dconstraint) : bool :=
+  match a, b with
+  | DSingle k1, DSingle k2 => implies_c k1 k2
+  | DDiff x y u, DDiff x' y' u' =>
+      clock_eqb x x' && clock_eqb y y' && dec_b (Rle_dec u u')
+  | _, _ => false
+  end.
+
+Lemma implies_d_sound :
+  forall v a b, implies_d a b = true -> dc_holds v a -> dc_holds v b.
+Proof.
+  intros v [k1|x y u] [k2|x' y' u'] H Ha; simpl in *; try discriminate.
+  - exact (implies_c_sound (v := v) H Ha).
+  - apply andb_true_iff in H. destruct H as [H Hu].
+    apply andb_true_iff in H. destruct H as [Hx Hy].
+    apply clock_eqb_true in Hx. apply clock_eqb_true in Hy. subst x' y'.
+    apply dec_b_true in Hu. lra.
+Qed.
+
+Definition trivial_d (c : dconstraint) : bool :=
+  match c with
+  | DDiff x y b => clock_eqb x y && dec_b (Rle_dec 0 b)
+  | DSingle _ => false
+  end.
+
+Lemma trivial_d_sound : forall v c, trivial_d c = true -> dc_holds v c.
+Proof.
+  intros v [k|x y b] H; simpl in *; [discriminate|].
+  apply andb_true_iff in H. destruct H as [Hx Hb].
+  apply clock_eqb_true in Hx. subst y. apply dec_b_true in Hb. lra.
+Qed.
+
+Definition self_contra (c : dconstraint) : bool :=
+  match c with
+  | DDiff x y b => clock_eqb x y && dec_b (Rlt_dec b 0)
+  | DSingle _ => false
+  end.
+
+Lemma self_contra_sound : forall v c, self_contra c = true -> ~ dc_holds v c.
+Proof.
+  intros v [k|x y b] H; simpl in *; [discriminate|].
+  apply andb_true_iff in H. destruct H as [Hx Hb].
+  apply clock_eqb_true in Hx. subst y. apply dec_b_true in Hb. lra.
+Qed.
+
+Definition insert_d (c : dconstraint) (acc : dconj) : dconj :=
+  if trivial_d c then acc
+  else if existsb (fun a => implies_d a c) acc then acc
+  else c :: filter (fun a => negb (implies_d c a)) acc.
+
+Definition dnorm_conj (c : dconj) : dconj := fold_right insert_d [] c.
+
+Lemma insert_d_holds :
+  forall v c acc,
+    conj_holds v (insert_d c acc) <-> dc_holds v c /\ conj_holds v acc.
+Proof.
+  intros v c acc. unfold insert_d, conj_holds.
+  destruct (trivial_d c) eqn:Ht.
+  - pose proof (trivial_d_sound v Ht). tauto.
+  - destruct (existsb (fun a => implies_d a c) acc) eqn:He.
+    + apply existsb_exists in He. destruct He as [a [Ha Hac]].
+      split; [|tauto]. intro H. split; [|exact H].
+      rewrite Forall_forall in H. exact (implies_d_sound Hac (H a Ha)).
+    + rewrite Forall_cons_iff. split.
+      * intros [Hc Hf]. split; [exact Hc|].
+        rewrite Forall_forall in *. intros a Ha.
+        destruct (implies_d c a) eqn:E.
+        -- exact (implies_d_sound E Hc).
+        -- apply Hf. apply filter_In. split; [exact Ha|]. rewrite E. reflexivity.
+      * intros [Hc Hf]. split; [exact Hc|].
+        rewrite Forall_forall in *. intros a Ha.
+        apply filter_In in Ha. apply Hf. tauto.
+Qed.
+
+Lemma dnorm_conj_holds :
+  forall v c, conj_holds v (dnorm_conj c) <-> conj_holds v c.
+Proof.
+  intros v c. unfold dnorm_conj.
+  induction c as [|a c IH]; simpl; [tauto|].
+  rewrite insert_d_holds, IH. unfold conj_holds. rewrite Forall_cons_iff. tauto.
+Qed.
+
+(* [conj_implies c a = true]: the conjunction [c] implies the conjunction [a]. *)
+Definition conj_implies (c a : dconj) : bool :=
+  forallb (fun b => existsb (fun x => implies_d x b) c) a.
+
+Lemma conj_implies_sound :
+  forall v c a, conj_implies c a = true -> conj_holds v c -> conj_holds v a.
+Proof.
+  intros v c a H Hc. unfold conj_implies, conj_holds in *.
+  rewrite forallb_forall in H. rewrite Forall_forall in *.
+  intros b Hb. specialize (H b Hb). apply existsb_exists in H.
+  destruct H as [x [Hx Hxb]]. exact (implies_d_sound Hxb (Hc x Hx)).
+Qed.
+
+Definition insert_g (c : dconj) (acc : dguard) : dguard :=
+  if existsb self_contra c then acc
+  else if existsb (fun a => conj_implies c a) acc then acc
+  else c :: filter (fun a => negb (conj_implies a c)) acc.
+
+Definition dnorm_guard (g : dguard) : dguard :=
+  fold_right insert_g [] (map dnorm_conj g).
+
+Lemma dguard_holds_cons :
+  forall v c g, dguard_holds v (c :: g) <-> conj_holds v c \/ dguard_holds v g.
+Proof.
+  intros v c g. unfold dguard_holds. split.
+  - intros [d [[<-|Hd] Hh]]; [left; exact Hh | right; exists d; tauto].
+  - intros [Hc|[d [Hd Hh]]]; [exists c; split; [left; reflexivity | exact Hc]|].
+    exists d. split; [right; exact Hd | exact Hh].
+Qed.
+
+Lemma insert_g_holds :
+  forall v c acc,
+    dguard_holds v (insert_g c acc) <-> conj_holds v c \/ dguard_holds v acc.
+Proof.
+  intros v c acc. unfold insert_g.
+  destruct (existsb self_contra c) eqn:Es.
+  - apply existsb_exists in Es. destruct Es as [x [Hx Hsc]].
+    split; [intro H; right; exact H|].
+    intros [Hc|H]; [|exact H]. exfalso.
+    unfold conj_holds in Hc. rewrite Forall_forall in Hc.
+    exact (self_contra_sound Hsc (Hc x Hx)).
+  - destruct (existsb (fun a => conj_implies c a) acc) eqn:E.
+    + apply existsb_exists in E. destruct E as [a [Ha Hca]].
+      split; [intro H; right; exact H|].
+      intros [Hc|H]; [|exact H].
+      exists a. split; [exact Ha | exact (conj_implies_sound Hca Hc)].
+    + rewrite dguard_holds_cons. split.
+      * intros [Hc|[d [Hd Hh]]]; [left; exact Hc|].
+        right. apply filter_In in Hd. exists d. tauto.
+      * intros [Hc|[d [Hd Hh]]]; [left; exact Hc|].
+        destruct (conj_implies d c) eqn:E2.
+        -- left. exact (conj_implies_sound E2 Hh).
+        -- right. exists d. split; [|exact Hh].
+           apply filter_In. rewrite E2. tauto.
+Qed.
+
+Lemma dnorm_guard_holds :
+  forall v g, dguard_holds v (dnorm_guard g) <-> dguard_holds v g.
+Proof.
+  intros v g. unfold dnorm_guard.
+  induction g as [|c g IH]; simpl.
+  - tauto.
+  - rewrite insert_g_holds, IH, dguard_holds_cons, dnorm_conj_holds. tauto.
+Qed.
+
+Definition normalize_dtrans (t : dtrans) : dtrans :=
+  {| dt_src := dt_src t; dt_label := dt_label t;
+     dt_guard := dnorm_guard (dt_guard t);
+     dt_resets := dt_resets t; dt_tgt := dt_tgt t |}.
+
+Definition normalize_d (D : DTA) : DTA :=
+  {| dta_nstates := dta_nstates D;
+     dta_init := dta_init D;
+     dta_trans := map normalize_dtrans (dta_trans D);
+     dta_accepting := dta_accepting D;
+     dta_inv := dta_inv D |}.
+
+Lemma normalize_dtrans_enabled :
+  forall (rho : ext_word root) i t,
+    dtrans_enabled rho i (normalize_dtrans t) <-> dtrans_enabled rho i t.
+Proof.
+  intros rho i t. unfold dtrans_enabled, normalize_dtrans. simpl.
+  rewrite dnorm_guard_holds. tauto.
+Qed.
+
+Theorem normalize_d_accepts :
+  forall D w, DTA_accepts D w <-> DTA_accepts (normalize_d D) w.
+Proof.
+  intro D. apply dta_accepts_of_ext.
+  - intros rho [run [Hinit [Hsteps Hbuchi]]].
+    exists run. split; [exact Hinit|]. split; [|exact Hbuchi].
+    intro i. destruct (Hsteps i) as [Hbound [Hinv [t' [Hin [Hsrc [Hdst Hen]]]]]].
+    split; [exact Hbound|]. split; [exact Hinv|].
+    simpl in Hin. apply in_map_iff in Hin. destruct Hin as [t [<- Ht]].
+    exists t. split; [exact Ht|]. split; [exact Hsrc|]. split; [exact Hdst|].
+    apply normalize_dtrans_enabled. exact Hen.
+  - intros rho _ [run [Hinit [Hsteps Hbuchi]]].
+    exists run. split; [exact Hinit|]. split; [|exact Hbuchi].
+    intro i. destruct (Hsteps i) as [Hbound [Hinv [t [Ht [Hsrc [Hdst Hen]]]]]].
+    split; [exact Hbound|]. split; [exact Hinv|].
+    exists (normalize_dtrans t). split; [simpl; apply in_map; exact Ht|].
+    split; [exact Hsrc|]. split; [exact Hdst|].
+    apply normalize_dtrans_enabled. exact Hen.
+Qed.
+
+(* ====================================================================== *)
+(* 9c. Removal of the transitions leaving locations never entered         *)
+(* ====================================================================== *)
+
+(* The copies of a location beyond its number of disjuncts are never
+   entered; their outgoing transitions are removed, until nothing changes. *)
+Definition dhas_incoming (D : DTA) (l : nat) : bool :=
+  existsb (fun t => Nat.eqb (dt_tgt t) l) (dta_trans D).
+
+Definition dprune (D : DTA) : DTA :=
+  {| dta_nstates := dta_nstates D;
+     dta_init := dta_init D;
+     dta_trans := filter (fun t => Nat.eqb (dt_src t) (dta_init D) ||
+                                   dhas_incoming D (dt_src t)) (dta_trans D);
+     dta_accepting := dta_accepting D;
+     dta_inv := dta_inv D |}.
+
+Theorem dprune_accepts :
+  forall D w, DTA_accepts D w <-> DTA_accepts (dprune D) w.
+Proof.
+  intro D. apply dta_accepts_of_ext.
+  - intros rho [run [Hinit [Hsteps Hbuchi]]].
+    exists run. split; [exact Hinit|]. split; [|exact Hbuchi].
+    intro i. destruct (Hsteps i) as [Hbound [Hinv [t [Hin [Hsrc [Hdst Hen]]]]]].
+    split; [exact Hbound|]. split; [exact Hinv|].
+    simpl in Hin. apply filter_In in Hin.
+    exists t. tauto.
+  - intros rho _ [run [Hinit [Hsteps Hbuchi]]].
+    exists run. split; [exact Hinit|]. split; [|exact Hbuchi].
+    intro i. destruct (Hsteps i) as [Hbound [Hinv [t [Ht [Hsrc [Hdst Hen]]]]]].
+    split; [exact Hbound|]. split; [exact Hinv|].
+    exists t. split; [|tauto].
+    simpl. apply filter_In. split; [exact Ht|]. apply orb_true_iff.
+    destruct i as [|j].
+    + left. rewrite Hsrc, Hinit. apply Nat.eqb_refl.
+    + right. unfold dhas_incoming. apply existsb_exists.
+      destruct (Hsteps j) as [_ [_ [t' [Ht' [_ [Hdst' _]]]]]].
+      exists t'. split; [exact Ht'|]. rewrite Hdst', Hsrc. apply Nat.eqb_refl.
+Qed.
+
+Fixpoint dprune_n (n : nat) (D : DTA) : DTA :=
+  match n with
+  | O => D
+  | S n' =>
+      if Nat.eqb (length (dta_trans (dprune D))) (length (dta_trans D))
+      then D else dprune_n n' (dprune D)
+  end.
+
+Definition dprune_all (D : DTA) : DTA := dprune_n (length (dta_trans D)) D.
+
+Theorem dprune_n_accepts :
+  forall n D w, DTA_accepts D w <-> DTA_accepts (dprune_n n D) w.
+Proof.
+  induction n as [|n IH]; intros D w; simpl; [reflexivity|].
+  destruct (Nat.eqb _ _); [reflexivity|].
+  rewrite (dprune_accepts D w). apply IH.
+Qed.
+
+Lemma dprune_n_incl :
+  forall n D t, In t (dta_trans (dprune_n n D)) -> In t (dta_trans D).
+Proof.
+  induction n as [|n IH]; intros D t H; simpl in *; [exact H|].
+  destruct (Nat.eqb _ _); [exact H|].
+  apply IH in H. simpl in H. apply filter_In in H. tauto.
+Qed.
+
+Lemma dprune_n_inv : forall n D, dta_inv (dprune_n n D) = dta_inv D.
+Proof.
+  induction n as [|n IH]; intro D; simpl; [reflexivity|].
+  destruct (Nat.eqb _ _); [reflexivity|]. rewrite IH. reflexivity.
+Qed.
+
+(* ====================================================================== *)
 (* 10. The exported automaton                                             *)
 (* ====================================================================== *)
 
 Definition export (A : TBA root) : DTA :=
-  explode_all (split (merge_transitions (of_tba A))).
+  dprune_all (explode_all (normalize_d (split
+    (normalize_d (merge_transitions (of_tba A)))))).
 
 Theorem export_accepts :
   forall A w, TBA_accepts A w <-> DTA_accepts (export A) w.
@@ -1239,16 +1598,20 @@ Proof.
   intros A w. unfold export.
   rewrite (of_tba_accepts A w).
   rewrite (merge_transitions_accepts (of_tba A) w).
-  rewrite (@split_accepts (merge_transitions (of_tba A)) w);
+  rewrite (normalize_d_accepts (merge_transitions (of_tba A)) w).
+  rewrite (@split_accepts (normalize_d (merge_transitions (of_tba A))) w);
     [| intro l; reflexivity].
-  apply explode_accepts.
+  rewrite normalize_d_accepts.
+  rewrite explode_accepts.
+  unfold dprune_all. apply dprune_n_accepts.
 Qed.
 
 (* Guards of the exported automaton are conjunctions (one disjunct). *)
 Theorem export_guards_conjunctive :
   forall A t, In t (dta_trans (export A)) -> exists c, dt_guard t = [c].
 Proof.
-  intros A t Hin. exact (explode_conjunctive Hin).
+  intros A t Hin. unfold export, dprune_all in Hin.
+  apply dprune_n_incl in Hin. exact (explode_conjunctive Hin).
 Qed.
 
 (* Invariants of the exported automaton are conjunctions of upper bounds. *)
@@ -1256,7 +1619,8 @@ Theorem export_invariants_conjunctive :
   forall A s,
     dta_inv (export A) s = None \/ exists U, dta_inv (export A) s = Some [U].
 Proof.
-  intros A s. exact (split_inv_conjunctive (merge_transitions (of_tba A)) s).
+  intros A s. unfold export, dprune_all. rewrite dprune_n_inv.
+  exact (split_inv_conjunctive (normalize_d (merge_transitions (of_tba A))) s).
 Qed.
 
 End Export.
