@@ -29,6 +29,11 @@ let mk_or p1 p2 =
     | _, False -> p1
     | _,_ -> Or(p1,p2)
 
+let mk_F p = Until(True,p)
+let mk_G p = Release(False,p)
+let mk_GF p = mk_G (mk_F p)
+let mk_W p1 p2 = mk_or (mk_G p1) (Until(p1,p2))
+
 let rec pp_ltl pp_p oc = function
   | True -> Printf.fprintf oc "true"
   | False -> Printf.fprintf oc "false"

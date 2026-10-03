@@ -31,4 +31,5 @@ rule read =
   | "\"unch(" (id as x) ")\"" {UNCH x}
   | "\"" (id as x) (' '*) (oper as o) (' '*) (int as d) "\"" {CLK (x,o,int_of_string d)}
   | "\"" (id as a) "\""  { EVENT a }
+  | (id as a)  { EVENT a }
   | _ { raise (SyntaxError ("Unexpected char: " ^ string_of_int (Char.code (Lexing.lexeme_char lexbuf 0)))) }
