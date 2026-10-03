@@ -33,8 +33,8 @@
   No new axiom: the only project axiom remains LTL_TO_BUCHI_CORRECT.
 *)
 
-From Stdlib Require Import Arith Lia List Bool Reals Lra.
-From Stdlib Require Import Classical ClassicalDescription.
+Require Import Arith Lia List Bool Reals Lra.
+Require Import Classical ClassicalDescription.
 Require Import MTL_to_TBA_Shared_Clock_Derived_Strict_Direct_Core.
 Require Import EncodingCorrect_Shared_Clock_Derived_Strict_Direct_Proof.
 Import ListNotations.
@@ -347,12 +347,161 @@ Definition inv_guard (A : TBA root) (l : nat) (Z : list (Clock root))
     : guard root :=
   map (inv_guard_item A l Z) (inv_clocks A l).
 
+(* ====================================================================== *)
+(* 3b. Tightening of guards                                               *)
+(* ====================================================================== *)
+
+(* Every time a guard is strengthened, the constraints implied by another
+   constraint of the guard on the same clock are dropped, so that a guard
+   keeps at most one lower bound and one upper bound per clock (an equality
+   counting as both). *)
+
+Definition dec_b {P Q : Prop} (d : {P} + {Q}) : bool := if d then true else false.
+
+Lemma dec_b_true : forall (P Q : Prop) (d : {P} + {Q}), dec_b d = true -> P.
+Proof. intros P Q [p|q] H; [exact p | discriminate]. Qed.
+
+(* Satisfaction of a clock constraint by a clock valuation. *)
+Definition cc_holds (v : Clock root -> R) (k : clock_constraint root) : Prop :=
+  match guard_comparison k with
+  | CLe => v (guard_clock k) <= guard_bound k
+  | CLt => v (guard_clock k) < guard_bound k
+  | CGe => guard_bound k <= v (guard_clock k)
+  | CGt => guard_bound k < v (guard_clock k)
+  | CEq => v (guard_clock k) = guard_bound k
+  end.
+
+Lemma cc_holds_at :
+  forall (rho : ext_word root) i k,
+    clock_constraint_holds rho i k <-> cc_holds (fun x => ew_val rho i x) k.
+Proof. intros rho i k. unfold clock_constraint_holds, cc_holds. tauto. Qed.
+
+(* [implies_c a b = true]: the constraint [a] implies the constraint [b]. *)
+Definition implies_c (a b : clock_constraint root) : bool :=
+  let u := guard_bound a in
+  let w := guard_bound b in
+  clock_eqb (guard_clock a) (guard_clock b) &&
+  match guard_comparison b with
+  | CLe => match guard_comparison a with
+           | CLe | CLt | CEq => dec_b (Rle_dec u w)
+           | _ => false
+           end
+  | CLt => match guard_comparison a with
+           | CLe | CEq => dec_b (Rlt_dec u w)
+           | CLt => dec_b (Rle_dec u w)
+           | _ => false
+           end
+  | CGe => match guard_comparison a with
+           | CGe | CGt | CEq => dec_b (Rle_dec w u)
+           | _ => false
+           end
+  | CGt => match guard_comparison a with
+           | CGe | CEq => dec_b (Rlt_dec w u)
+           | CGt => dec_b (Rle_dec w u)
+           | _ => false
+           end
+  | CEq => match guard_comparison a with
+           | CEq => dec_b (Req_EM_T u w)
+           | _ => false
+           end
+  end.
+
+Lemma implies_c_sound :
+  forall v a b, implies_c a b = true -> cc_holds v a -> cc_holds v b.
+Proof.
+  intros v [xa ca ua] [xb cb ub] Himp Ha.
+  unfold implies_c, cc_holds in *. simpl in *.
+  apply andb_true_iff in Himp. destruct Himp as [Hx Hc].
+  apply clock_eqb_true in Hx. subst xb.
+  destruct cb, ca; try discriminate; apply dec_b_true in Hc; lra.
+Qed.
+
+(* Adds [c] to a list of constraints unless it is implied by one of them,
+   and removes the constraints that [c] implies. *)
+Definition insert_t (c : clock_constraint root) (acc : list (clock_constraint root))
+    : list (clock_constraint root) :=
+  if existsb (fun a => implies_c a c) acc then acc
+  else c :: filter (fun a => negb (implies_c c a)) acc.
+
+Lemma insert_t_holds :
+  forall v c acc,
+    Forall (cc_holds v) (insert_t c acc) <-> cc_holds v c /\ Forall (cc_holds v) acc.
+Proof.
+  intros v c acc. unfold insert_t.
+  destruct (existsb (fun a => implies_c a c) acc) eqn:He.
+  - apply existsb_exists in He. destruct He as [a [Ha Hac]].
+    split; [|tauto]. intro H. split; [|exact H].
+    rewrite Forall_forall in H. exact (implies_c_sound Hac (H a Ha)).
+  - rewrite Forall_cons_iff. split.
+    + intros [Hc Hf]. split; [exact Hc|].
+      rewrite Forall_forall in *. intros a Ha.
+      destruct (implies_c c a) eqn:E.
+      * exact (implies_c_sound E Hc).
+      * apply Hf. apply filter_In. split; [exact Ha|]. rewrite E. reflexivity.
+    + intros [Hc Hf]. split; [exact Hc|].
+      rewrite Forall_forall in *. intros a Ha.
+      apply filter_In in Ha. apply Hf. tauto.
+Qed.
+
+Fixpoint present (g : guard root) : list (clock_constraint root) :=
+  match g with
+  | [] => []
+  | Some k :: g' => k :: present g'
+  | None :: g' => present g'
+  end.
+
+Lemma present_holds :
+  forall (rho : ext_word root) i g,
+    Forall (guard_item_holds rho i) g <->
+    Forall (cc_holds (fun x => ew_val rho i x)) (present g).
+Proof.
+  intros rho i g. induction g as [|[k|] g IH]; simpl.
+  - split; intros _; constructor.
+  - rewrite !Forall_cons_iff, IH. simpl. rewrite cc_holds_at. tauto.
+  - rewrite Forall_cons_iff, IH. simpl. tauto.
+Qed.
+
+Lemma guard_of_list_holds :
+  forall (rho : ext_word root) i l,
+    Forall (guard_item_holds rho i) (map Some l) <->
+    Forall (cc_holds (fun x => ew_val rho i x)) l.
+Proof.
+  intros rho i l. rewrite Forall_map.
+  split; intro H; eapply Forall_impl; try exact H;
+    intros k Hk; simpl in *; apply cc_holds_at; exact Hk.
+Qed.
+
+Definition tighten (g : guard root) : guard root :=
+  map Some (fold_right insert_t [] (present g)).
+
+Lemma tighten_holds :
+  forall (rho : ext_word root) i g,
+    Forall (guard_item_holds rho i) (tighten g) <->
+    Forall (guard_item_holds rho i) g.
+Proof.
+  intros rho i g. unfold tighten.
+  rewrite guard_of_list_holds, (present_holds rho i g).
+  induction (present g) as [|c l IH]; simpl; [tauto|].
+  rewrite insert_t_holds, IH, Forall_cons_iff. tauto.
+Qed.
+
+(* Concatenation of two guards, tightened. *)
+Definition conj_guard (g h : guard root) : guard root := tighten (g ++ h).
+
+Lemma conj_guard_holds :
+  forall (rho : ext_word root) i g h,
+    Forall (guard_item_holds rho i) (conj_guard g h) <->
+    Forall (guard_item_holds rho i) g /\ Forall (guard_item_holds rho i) h.
+Proof.
+  intros rho i g h. unfold conj_guard. rewrite tighten_holds, Forall_app. tauto.
+Qed.
+
 (* g := g /\ Inv(l')[Z := 0] for a transition l --g,Z--> l'. *)
 Definition strengthen_transition (A : TBA root) (t : tba_transition root)
     : tba_transition root :=
   {| bt_source := bt_source t;
      bt_label := bt_label t;
-     bt_guard := bt_guard t ++ inv_guard A (bt_target t) (bt_resets t);
+     bt_guard := conj_guard (bt_guard t) (inv_guard A (bt_target t) (bt_resets t));
      bt_resets := bt_resets t;
      bt_target := bt_target t |}.
 
@@ -380,7 +529,7 @@ Proof.
   intros A rho i t [Hlab [Hguard Hres]].
   simpl in *.
   split; [exact Hlab|]. split; [|exact Hres].
-  apply Forall_app in Hguard. exact (proj1 Hguard).
+  apply conj_guard_holds in Hguard. exact (proj1 Hguard).
 Qed.
 
 Lemma propagate_sound :
@@ -451,7 +600,7 @@ Proof.
   split; [exact Hsrc|]. split; [exact Hdst|].
   destruct Hen as [Hlab [Hguard Hres]].
   split; [exact Hlab|]. split; [|exact Hres].
-  simpl. apply Forall_app. split; [exact Hguard|].
+  simpl. apply conj_guard_holds. split; [exact Hguard|].
   apply (@inv_guard_holds A rho i t t' Hcc); try assumption.
   - split; [exact Hlab|]. split; assumption.
   - rewrite Hsrc', Hdst. reflexivity.

@@ -36,7 +36,7 @@
   translation.
 *)
 
-From Coq Require Import Arith Lia List Bool Reals Lra.
+Require Import Arith Lia List Bool Reals Lra.
 Import ListNotations.
 Open Scope R_scope.
 

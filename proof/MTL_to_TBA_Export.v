@@ -36,8 +36,8 @@
   axiom: the only project axiom remains LTL_TO_BUCHI_CORRECT.
 *)
 
-From Stdlib Require Import Arith Lia List Bool Reals Lra.
-From Stdlib Require Import Classical ClassicalDescription.
+Require Import Arith Lia List Bool Reals Lra.
+Require Import Classical ClassicalDescription.
 Require Import MTL_to_TBA_Shared_Clock_Derived_Strict_Direct_Core.
 Require Import EncodingCorrect_Shared_Clock_Derived_Strict_Direct_Proof.
 Require Import MTL_to_TBA_Invariants.
